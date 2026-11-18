@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
-project(prism-amd
+project(prisma
     VERSION 1.0.0
-    DESCRIPTION "Open-Source Hardware Display & Color Control Suite for AMD GPUs on Linux"
+    DESCRIPTION "Controle de cor em hardware para GPUs AMD no Linux"
     LANGUAGES CXX
 )
 
