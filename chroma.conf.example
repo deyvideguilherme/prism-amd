@@ -1,0 +1,28 @@
+# ==============================================================================
+# Chroma Vulkan Layer - Configuração em Tempo Real
+# ==============================================================================
+# Este arquivo é lido antes de cada apresentação de frame (vkQueuePresentKHR).
+# Modificações salvas neste arquivo são aplicadas instantaneamente sem reiniciar
+# o jogo ou aplicativo Vulkan.
+#
+# Caminho de monitoramento: /tmp/chroma.conf
+# ==============================================================================
+
+# Saturação (Digital Vibrance):
+# - 1.0  = Cores originais (100%)
+# - 1.5  = +50% saturação (150% Digital Vibrance)
+# - 2.0  = Dobro de saturação
+# - 0.0  = Monocromático (Preto e Branco puro)
+saturation = 1.5
+
+# Contraste (centralizado em 0.5):
+# - 1.0  = Contraste normal
+# - 1.15 = +15% contraste
+# - 0.85 = -15% contraste
+contrast = 1.0
+
+# Brilho (deslocamento linear):
+# -  0.00 = Brilho padrão
+# -  0.05 = Levemente mais claro (+5%)
+# - -0.05 = Levemente mais escuro (-5%)
+brightness = 0.0

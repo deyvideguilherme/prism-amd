@@ -1,0 +1,58 @@
+# Build directories
+build/
+bin/
+lib/
+out/
+.cache/
+
+# Compiled libraries & shaders
+*.spv
+shader_spv.h
+*.so
+*.so.*
+*.dylib
+*.dll
+*.a
+
+# Linux Kernel Module (Kbuild) artifacts
+kernel/*.ko
+kernel/*.mod
+kernel/*.mod.c
+kernel/*.mod.o
+kernel/*.o
+kernel/*.cmd
+kernel/.*.cmd
+kernel/..*.cmd
+kernel/.tmp_versions/
+kernel/modules.order
+kernel/Module.symvers
+kernel/.module-common.o
+kernel/.chroma_amd*
+kernel/.prism_amd*
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.o
+*.cmd
+.*.cmd
+..*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+Module.markers
+.module-common.o
+
+# Local runtime & test configs
+/tmp/chroma.conf
+/tmp/prism.conf
+/tmp/chroma-drm.log
+/tmp/prism-drm.log
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
