@@ -1,0 +1,41 @@
+#version 450
+
+layout (local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Imagem da swapchain vinculada como storage image (binding = 0)
+layout (binding = 0, rgba8) uniform image2D u_swapchain_image;
+
+// Parâmetros em tempo real via Push Constants (zero latency)
+layout (push_constant) uniform PushConstants {
+    float saturation;   // 1.0 = normal, >1.0 = vibrance, 0.0 = monocromático
+    float contrast;     // 1.0 = normal, >1.0 = maior contraste, <1.0 = menor contraste
+    float brightness;   // 0.0 = normal, >0.0 = mais claro, <0.0 = mais escuro
+} pc;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 img_size = imageSize(u_swapchain_image);
+
+    // Descarta threads fora dos limites da swapchain
+    if (coord.x >= img_size.x || coord.y >= img_size.y) {
+        return;
+    }
+
+    vec4 pixel = imageLoad(u_swapchain_image, coord);
+    vec3 rgb = pixel.rgb;
+
+    // 1. Saturação (Digital Vibrance):
+    // Interpolação linear entre luminância Rec.709 e a cor original
+    float luma = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+    rgb = mix(vec3(luma), rgb, pc.saturation);
+
+    // 2. Contraste e Brilho:
+    // Ajuste linear centralizado em 0.5: (rgb - 0.5) * contrast + 0.5 + brightness
+    rgb = (rgb - vec3(0.5)) * pc.contrast + vec3(0.5) + vec3(pc.brightness);
+
+    // Clamp para o intervalo dinâmico padrão [0.0, 1.0]
+    rgb = clamp(rgb, 0.0, 1.0);
+
+    // Grava o pixel processado de volta na swapchain mantendo o canal alfa original
+    imageStore(u_swapchain_image, coord, vec4(rgb, pixel.a));
+}
