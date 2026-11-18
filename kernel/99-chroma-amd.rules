@@ -1,0 +1,2 @@
+# Allow members of video group to control hardware color properties in /sys/kernel/chroma_amd
+SUBSYSTEM=="module", KERNEL=="chroma_amd", ACTION=="add", RUN+="/bin/sh -c 'chgrp -R video /sys/kernel/chroma_amd && chmod -R 0664 /sys/kernel/chroma_amd'"
