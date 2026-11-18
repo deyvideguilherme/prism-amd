@@ -2,8 +2,8 @@
 /*
  * chroma_amd.c - Linux Kernel Module for AMDGPU Hardware Color Acceleration (prism-amd)
  *
- * Injects Rec.709 Color Transformation Matrices (CTM) directly into the AMD Display
- * Core Next (DCN) hardware pipeline by intercepting DRM atomic commits via kprobe.
+ * Injects Rec.709 Color Transformation Matrices (CTM) and GAMMA_LUT tables directly into
+ * the AMD Display Core Next (DCN) hardware pipeline by intercepting DRM atomic commits via kprobe.
  */
 
 #include <linux/module.h>
@@ -29,8 +29,8 @@
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("prism-amd Contributors");
-MODULE_DESCRIPTION("Hardware Color Transformation Matrix (CTM) Interceptor for AMDGPU DRM/KMS");
-MODULE_VERSION("1.0.0");
+MODULE_DESCRIPTION("Hardware CTM and GAMMA_LUT Interceptor for AMDGPU DRM/KMS");
+MODULE_VERSION("1.1.0");
 
 /*
  * Kernel compatibility:
@@ -48,6 +48,7 @@ MODULE_VERSION("1.0.0");
 #define REC709_BW 722LL
 
 #define MAX_CRTCS 32
+#define MAX_GAMMA_LUT_SIZE 4096
 
 /* Sysfs tuning parameters (/sys/kernel/chroma_amd/) */
 static int g_saturation = 100; // 0 to 400 (default 100 = 100%)
@@ -56,10 +57,13 @@ static int g_brightness = 0;   // -100 to 100 (default 0 = 0%)
 static int g_enabled = 1;      // 0 or 1 (default 1)
 
 static atomic_t config_generation = ATOMIC_INIT(1);
-static int g_crtc_applied_gen[MAX_CRTCS];
+static int g_crtc_applied_ctm_gen[MAX_CRTCS];
+static int g_crtc_applied_lut_gen[MAX_CRTCS];
+static bool g_crtc_lut_injected[MAX_CRTCS];
 
 static DEFINE_SPINLOCK(g_ctm_lock);
 static struct drm_color_ctm g_current_ctm;
+static struct drm_color_lut g_lut_buffer[MAX_GAMMA_LUT_SIZE];
 
 /*
  * Converts rational value (num / den) into 64-bit S31.32 sign-magnitude fixed-point
@@ -80,7 +84,7 @@ static u64 to_s31_32(s64 num, u64 den)
 		abs_num = (u64)num;
 	}
 
-	/* Scale magnitude by 2^32 with 128-bit safe intermediate division (no FPU) */
+	/* Scale magnitude by 2^32 with safe intermediate 128-bit division (no FPU) */
 	mag = mul_u64_u64_div_u64(abs_num, 1ULL << 32, den);
 	mag &= ((1ULL << 63) - 1);
 
@@ -118,6 +122,33 @@ static void chroma_recalc_ctm(void)
 	spin_lock_irqsave(&g_ctm_lock, flags);
 	memcpy(&g_current_ctm, &new_ctm, sizeof(new_ctm));
 	spin_unlock_irqrestore(&g_ctm_lock, flags);
+}
+
+/*
+ * Generates hardware GAMMA_LUT for brightness adjustment using strictly 64-bit integer arithmetic.
+ * Maps brightness (-100 to 100) to a 16-bit offset (-16384 to +16384).
+ */
+static void chroma_generate_gamma_lut(struct drm_color_lut *lut, u32 size, int brightness)
+{
+	u32 i;
+	s64 b_offset;
+
+	b_offset = div_s64((s64)brightness * 16384LL, 100LL);
+
+	for (i = 0; i < size; ++i) {
+		u64 base = div_u64((u64)i * 65535ULL, (u64)(size - 1));
+		s64 val = (s64)base + b_offset;
+
+		if (val < 0)
+			val = 0;
+		else if (val > 65535)
+			val = 65535;
+
+		lut[i].red = (u16)val;
+		lut[i].green = (u16)val;
+		lut[i].blue = (u16)val;
+		lut[i].reserved = 0;
+	}
 }
 
 /*
@@ -184,7 +215,6 @@ static ssize_t brightness_store(struct kobject *kobj, struct kobj_attribute *att
 		return -EINVAL;
 
 	g_brightness = val;
-	chroma_recalc_ctm();
 	atomic_inc(&config_generation);
 
 	return count;
@@ -273,24 +303,53 @@ static int chroma_pre_handler(struct kprobe *p, struct pt_regs *regs)
 			if (idx >= MAX_CRTCS)
 				continue;
 
-			/* Skip re-allocation if already applied with same config generation */
-			if (g_crtc_applied_gen[idx] == cur_gen && new_crtc_state->ctm)
-				continue;
+			/* Apply CTM matrix */
+			if (g_crtc_applied_ctm_gen[idx] != cur_gen || !new_crtc_state->ctm) {
+				new_blob = drm_property_create_blob(dev, sizeof(struct drm_color_ctm), &ctm_copy);
+				if (!IS_ERR(new_blob)) {
+					drm_property_replace_blob(&new_crtc_state->ctm, new_blob);
+					drm_property_blob_put(new_blob);
+					new_crtc_state->color_mgmt_changed = true;
+					g_crtc_applied_ctm_gen[idx] = cur_gen;
+				}
+			}
 
-			/* Create a new kernel property blob with updated CTM matrix */
-			new_blob = drm_property_create_blob(dev, sizeof(struct drm_color_ctm), &ctm_copy);
-			if (IS_ERR(new_blob))
-				continue;
+			/* Apply GAMMA_LUT for brightness if non-zero */
+			if (g_brightness != 0) {
+				u32 gamma_size = crtc->gamma_size;
 
-			/* Replace CTM blob in new_crtc_state and drop local reference */
-			drm_property_replace_blob(&new_crtc_state->ctm, new_blob);
-			drm_property_blob_put(new_blob);
-			new_crtc_state->color_mgmt_changed = true;
+				if (gamma_size >= 2) {
+					if (gamma_size > MAX_GAMMA_LUT_SIZE)
+						gamma_size = MAX_GAMMA_LUT_SIZE;
 
-			g_crtc_applied_gen[idx] = cur_gen;
+					if (g_crtc_applied_lut_gen[idx] != cur_gen || !new_crtc_state->gamma_lut) {
+						struct drm_property_blob *gamma_blob;
+
+						chroma_generate_gamma_lut(g_lut_buffer, gamma_size, g_brightness);
+						gamma_blob = drm_property_create_blob(dev,
+										      gamma_size * sizeof(struct drm_color_lut),
+										      g_lut_buffer);
+						if (!IS_ERR(gamma_blob)) {
+							drm_property_replace_blob(&new_crtc_state->gamma_lut, gamma_blob);
+							drm_property_blob_put(gamma_blob);
+							new_crtc_state->color_mgmt_changed = true;
+							g_crtc_applied_lut_gen[idx] = cur_gen;
+							g_crtc_lut_injected[idx] = true;
+						}
+					}
+				}
+			} else {
+				/* brightness == 0: restore gamma_lut if previously injected */
+				if (g_crtc_lut_injected[idx] && new_crtc_state->gamma_lut) {
+					drm_property_replace_blob(&new_crtc_state->gamma_lut, NULL);
+					new_crtc_state->color_mgmt_changed = true;
+					g_crtc_lut_injected[idx] = false;
+					g_crtc_applied_lut_gen[idx] = 0;
+				}
+			}
 		}
 	} else {
-		/* enabled == 0: clean up custom CTM if active */
+		/* enabled == 0: clean up custom CTM and GAMMA_LUT if active */
 		for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
 			unsigned int idx;
 
@@ -301,10 +360,17 @@ static int chroma_pre_handler(struct kprobe *p, struct pt_regs *regs)
 			if (idx >= MAX_CRTCS)
 				continue;
 
-			if (new_crtc_state->ctm && g_crtc_applied_gen[idx] != 0) {
+			if (new_crtc_state->ctm && g_crtc_applied_ctm_gen[idx] != 0) {
 				drm_property_replace_blob(&new_crtc_state->ctm, NULL);
 				new_crtc_state->color_mgmt_changed = true;
-				g_crtc_applied_gen[idx] = 0;
+				g_crtc_applied_ctm_gen[idx] = 0;
+			}
+
+			if (new_crtc_state->gamma_lut && g_crtc_lut_injected[idx]) {
+				drm_property_replace_blob(&new_crtc_state->gamma_lut, NULL);
+				new_crtc_state->color_mgmt_changed = true;
+				g_crtc_lut_injected[idx] = false;
+				g_crtc_applied_lut_gen[idx] = 0;
 			}
 		}
 	}
