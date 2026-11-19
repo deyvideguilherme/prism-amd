@@ -28,6 +28,9 @@ include(GNUInstallDirs)
 install(TARGETS prisma-ctl RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 
 if(BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME check_ui COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_ui.py)
+
     find_package(Threads REQUIRED)
     add_executable(test_cli tests/test_cli.cpp)
     target_link_libraries(test_cli PRIVATE prisma_cli Threads::Threads)
