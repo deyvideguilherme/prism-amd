@@ -49,7 +49,8 @@ std::vector<ConnectorInfo> get_connectors(const std::string& card_name, const st
     std::error_code ec;
     std::string prefix = card_name + "-";
 
-    for (const auto& entry : std::filesystem::directory_iterator(drm_root, ec)) {
+    for (std::filesystem::directory_iterator it(drm_root, ec), end; it != end && !ec; it.increment(ec)) {
+        const auto& entry = *it;
         std::string fn = entry.path().filename().string();
         if (fn.starts_with(prefix)) {
             std::string conn_name = fn.substr(prefix.size());
@@ -117,8 +118,8 @@ int run_doctor() {
             group_name = gr->gr_name;
         }
 
-        int fd_rw = ::open(dev_node, O_RDWR);
-        int fd_ro = (fd_rw < 0) ? ::open(dev_node, O_RDONLY) : -1;
+        int fd_rw = ::open(dev_node, O_RDWR | O_CLOEXEC);
+        int fd_ro = (fd_rw < 0) ? ::open(dev_node, O_RDONLY | O_CLOEXEC) : -1;
         int active_fd = (fd_rw >= 0) ? fd_rw : fd_ro;
 
         if (active_fd < 0) {
@@ -126,40 +127,30 @@ int run_doctor() {
                       << "       Current user lacks read/write permissions for " << dev_node << " (group: " << group_name << ").\n"
                       << "       Remediation:\n"
                       << "       - Add user to video group: sudo usermod -aG video $USER\n"
-                      << "       - Ensure udev rule is installed: /usr/lib/udev/rules.d/99-chroma-amd.rules\n"
+                      << "       - Ensure udev rule is installed: /usr/lib/udev/rules.d/70-chroma-amd.rules\n"
                       << "       - Log out and log back in, or restart your session (logind).\n";
             all_ok = false;
         } else {
-            std::cout << "[OK] Device node: " << dev_node
-                      << " (group: " << group_name << ", read/write access granted)\n";
-
-            // 4. Protocol & ABI Verification
-            uint32_t kabi = 0;
-            int ioctl_ret = ::ioctl(active_fd, PRISMA_IOC_GET_ABI, &kabi);
-            if (ioctl_ret == 0) {
-                if (kabi == PRISMA_ABI_VERSION) {
-                    std::cout << "[OK] Protocol ABI: v" << kabi
-                              << " (kernel module and CLI userspace are synchronized)\n";
-                } else {
-                    std::cout << "[FAIL] Protocol ABI mismatch: kernel module reports ABI v" << kabi
-                              << ", but CLI expects ABI v" << PRISMA_ABI_VERSION << ".\n"
-                              << "       Remediation: reload kernel module to apply updated ABI:\n"
-                              << "       sudo rmmod chroma_amd && sudo modprobe chroma_amd\n";
-                    all_ok = false;
-                }
+            if (fd_rw >= 0) {
+                std::cout << "[OK] Device node: " << dev_node
+                          << " (group: " << group_name << ", read/write access granted)\n";
             } else {
-                // Check sysfs fallback
-                auto sys_abi = read_line("/sys/kernel/chroma_amd/abi_version");
-                if (sys_abi && *sys_abi == std::to_string(PRISMA_ABI_VERSION)) {
-                    std::cout << "[OK] Protocol ABI: v" << *sys_abi
-                              << " (verified via sysfs telemetry)\n";
-                } else {
-                    std::cout << "[FAIL] Protocol ABI check failed: running kernel module does not support ABI v"
-                              << PRISMA_ABI_VERSION << " (outdated module loaded without ABI v1 ioctl).\n"
-                              << "       Remediation: reload the newly built kernel module:\n"
-                              << "       sudo rmmod chroma_amd && sudo modprobe chroma_amd\n";
-                    all_ok = false;
-                }
+                std::cout << "[FAIL] Device node: " << dev_node
+                          << " (group: " << group_name << ", read-only access)\n";
+                all_ok = false;
+            }
+
+            uint32_t kabi = 0;
+            if (::ioctl(active_fd, PRISMA_IOC_GET_ABI, &kabi) < 0) {
+                std::cout << "[FAIL] Protocol ABI ioctl unavailable. Reload the current chroma_amd module.\n";
+                all_ok = false;
+            } else if (kabi != PRISMA_ABI_VERSION) {
+                std::cout << "[FAIL] Protocol ABI mismatch: kernel module reports ABI v" << kabi
+                          << ", but CLI expects ABI v" << PRISMA_ABI_VERSION << ".\n";
+                all_ok = false;
+            } else {
+                std::cout << "[OK] Protocol ABI: v" << kabi
+                          << " (kernel module and CLI userspace are synchronized)\n";
             }
 
             ::close(active_fd);
@@ -169,6 +160,7 @@ int run_doctor() {
     // 5. AMD GPU Dynamic Detection & Hardware Telemetry
     try {
         GpuTelemetry telem = read_gpu_telemetry();
+        if (telem.card_name.empty()) throw std::runtime_error("no AMD DRM device found");
         std::cout << "[OK] AMD GPU detected: " << telem.card_name
                   << " (driver: amdgpu, PCI: " << telem.pci_id << ")\n";
 
@@ -217,7 +209,7 @@ int run_doctor() {
 
     std::cout << "\n------------------------------------------------------\n";
     if (all_ok) {
-        std::cout << "Diagnosis: All checks passed. System is fully operational.\n";
+        std::cout << "Diagnosis: Module access, ABI and AMD GPU detection passed.\n";
         return 0;
     } else {
         std::cout << "Diagnosis: 1 or more critical issues detected. Please check the remediation steps above.\n";
