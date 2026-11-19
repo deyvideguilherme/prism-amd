@@ -2,7 +2,7 @@
 -- Prisma Control Center - Headless Telemetry, Hardware & Automation Service
 -- Manages background polling of AMD GPU hardware telemetry, color parameters,
 -- maintains historical ring-buffers, debounces mutations, manages profiles,
--- and handles automatic per-game profile switching based on focused Niri window.
+-- and handles dynamic open window discovery and automatic per-game profile switching.
 
 noctalia.setUpdateInterval(50)
 
@@ -22,7 +22,7 @@ local tickCount = 0
 local panelOpen = false
 local isPolling = false
 local isMutating = false
-local isQueryingWindow = false
+local isQueryingWindows = false
 
 local isAvailable = false
 local deviceState = {
@@ -63,7 +63,8 @@ local pendingState = {
     brightness = 0,
 }
 
--- Game auto-switching & app rules
+-- Game auto-switching, open windows discovery & app rules
+local openApps = {}
 local focusedAppId = ""
 local focusedAppTitle = ""
 local autoSwitchEnabled = true
@@ -162,6 +163,7 @@ local function publishStatus()
         profiles = savedProfiles,
         panel_open = panelOpen,
         error = if lastErrorMessage ~= "" then lastErrorMessage else nil,
+        openApps = openApps,
         focusedAppId = focusedAppId,
         focusedAppTitle = focusedAppTitle,
         autoSwitchEnabled = autoSwitchEnabled,
@@ -170,6 +172,7 @@ local function publishStatus()
     }
 
     noctalia.state.set("status", status)
+    noctalia.state.set("openApps", openApps)
     noctalia.state.set("focusedAppId", focusedAppId)
     noctalia.state.set("focusedAppTitle", focusedAppTitle)
     noctalia.state.set("autoSwitchEnabled", autoSwitchEnabled)
@@ -334,32 +337,104 @@ local function onFocusChanged(newAppId)
     end
 end
 
-local function pollFocusedWindow()
-    if isQueryingWindow then return end
-    isQueryingWindow = true
+local function pollWindows()
+    if isQueryingWindows then return end
+    isQueryingWindows = true
 
-    noctalia.runAsync("niri msg --json focused-window", function(result)
-        isQueryingWindow = false
+    noctalia.runAsync("niri msg --json windows", function(result)
+        isQueryingWindows = false
         if result.exitCode == 0 and type(result.stdout) == "string" and result.stdout ~= "" then
             local ok, parsed = pcall(function()
                 return noctalia.json.decode(result.stdout)
             end)
+
             if ok and type(parsed) == "table" then
-                local appId = parsed.app_id
-                local title = parsed.title
+                local detectedFocusedAppId = nil
+                local detectedFocusedAppTitle = nil
+                local appsMap = {}
 
-                if type(appId) == "string" and appId ~= "" then
-                    local lowerId = string.lower(appId)
-                    -- Ignore Noctalia's own panel and shell windows
-                    if lowerId:find("noctalia") == nil and lowerId:find("prisma") == nil then
-                        local friendlyTitle = if type(title) == "string" and title ~= "" then title else appId
-                        local changed = (appId ~= focusedAppId)
-                        focusedAppId = appId
-                        focusedAppTitle = friendlyTitle
+                for _, win in ipairs(parsed) do
+                    if type(win) == "table" and type(win.app_id) == "string" and win.app_id ~= "" then
+                        local appId = win.app_id
+                        local lowerId = string.lower(appId)
+                        -- Filter internal shell and plugin components
+                        if lowerId:find("noctalia") == nil and lowerId:find("prisma") == nil then
+                            local title = if type(win.title) == "string" and win.title ~= "" then win.title else appId
+                            local isFocused = (win.is_focused == true)
 
-                        if changed then
-                            onFocusChanged(appId)
+                            if isFocused then
+                                detectedFocusedAppId = appId
+                                detectedFocusedAppTitle = title
+                            end
+
+                            local existing = appsMap[appId]
+                            if existing == nil then
+                                appsMap[appId] = {
+                                    app_id = appId,
+                                    title = title,
+                                    is_focused = isFocused,
+                                }
+                            else
+                                if isFocused then
+                                    existing.is_focused = true
+                                    existing.title = title
+                                end
+                            end
                         end
+                    end
+                end
+
+                local list = {}
+                for _, item in pairs(appsMap) do
+                    table.insert(list, item)
+                end
+
+                -- Sort: focused window first, then alphabetically by title / app_id
+                table.sort(list, function(a, b)
+                    if a.is_focused ~= b.is_focused then
+                        return a.is_focused == true
+                    end
+                    local titleA = string.lower(a.title or a.app_id)
+                    local titleB = string.lower(b.title or b.app_id)
+                    return titleA < titleB
+                end)
+
+                openApps = list
+
+                if detectedFocusedAppId ~= nil then
+                    local changed = (detectedFocusedAppId ~= focusedAppId)
+                    focusedAppId = detectedFocusedAppId
+                    focusedAppTitle = if type(detectedFocusedAppTitle) == "string" and detectedFocusedAppTitle ~= ""
+                        then detectedFocusedAppTitle
+                        else detectedFocusedAppId
+
+                    if changed then
+                        onFocusChanged(detectedFocusedAppId)
+                    else
+                        publishStatus()
+                    end
+                else
+                    if #list == 0 and activeAutoProfile ~= nil then
+                        -- All windows closed, restore fallback state
+                        log("Nenhuma janela aberta detectada, restaurando calibragem anterior")
+                        activeAutoProfile = nil
+                        if fallbackState ~= nil then
+                            local sat = fallbackState.saturation or 100
+                            local con = fallbackState.contrast or 100
+                            local bri = fallbackState.brightness or 0
+                            local en = fallbackState.enabled or 1
+                            fallbackState = nil
+                            local setCmd = `prisma-ctl set -s {sat} -c {con} -b {bri} -e {en}`
+                            noctalia.runAsync(setCmd, function()
+                                pollStatus()
+                            end)
+                        else
+                            noctalia.runAsync("prisma-ctl profile reset", function()
+                                pollStatus()
+                            end)
+                        end
+                    else
+                        publishStatus()
                     end
                 end
             end
@@ -481,7 +556,7 @@ local function handleCommand(cmd)
         if panelOpen then
             pollStatus()
             refreshProfiles()
-            pollFocusedWindow()
+            pollWindows()
         end
 
     elseif cmd.action == "toggle_auto_switch" then
@@ -518,7 +593,7 @@ local function handleCommand(cmd)
                 title = if type(cmd.title) == "string" and cmd.title ~= "" then cmd.title else appId,
             }
             saveAppRules()
-            if autoSwitchEnabled and focusedAppId == appId then
+            if autoSwitchEnabled and (focusedAppId == appId or cmd.apply_now == true) then
                 activeAutoProfile = nil -- Force re-evaluation
                 onFocusChanged(appId)
             else
@@ -551,9 +626,9 @@ function update()
         end
     end
 
-    -- Focused window query every 1s (20 ticks)
+    -- Query open windows every 1s (20 ticks)
     if tickCount % TICKS_ACTIVE == 0 then
-        pollFocusedWindow()
+        pollWindows()
     end
 
     -- Periodic hardware telemetry polling interval
@@ -570,5 +645,5 @@ noctalia.state.watch("command", handleCommand)
 loadAppRules()
 pollStatus(function()
     refreshProfiles()
-    pollFocusedWindow()
+    pollWindows()
 end)

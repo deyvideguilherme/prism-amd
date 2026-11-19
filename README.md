@@ -141,9 +141,17 @@ noctalia msg plugins enable deyvideguilherme/prisma
 noctalia msg plugins list | grep prisma
 ```
 
-### Atalho Global no Niri (Alt+R) e Quick Tile
+### Atalho de Teclado no Niri e Quick Tile
 
-Para acesso rápido à central de controle durante o uso do desktop ou partidas em tela cheia, configure o atalho `Alt+R` no compositor Niri (`~/.config/niri/cfg/keybinds.kdl`):
+Para alternar rapidamente a exibição do painel, configure uma combinação de teclas no compositor Niri (`~/.config/niri/cfg/keybinds.kdl`). Recomenda-se a utilização da tecla `Mod` (Super / Windows):
+
+```kdl
+binds {
+    Mod+Shift+P allow-when-locked=true { spawn-sh "noctalia msg panel-toggle deyvideguilherme/prisma:panel"; }
+}
+```
+
+Caso prefira o atalho tradicional estilo AMD Adrenalin (`Alt+R`):
 
 ```kdl
 binds {
@@ -151,16 +159,19 @@ binds {
 }
 ```
 
-O plugin também registra um quick tile (`[[shortcut]]`) acessível na central de ações do Noctalia Shell (`Mod+S`), permitindo alternar a visibilidade do painel e visualizar o status do hardware e o perfil ativo.
+**Comportamento em Jogos (Proton / XWayland):** Em sessões Wayland, jogos em tela cheia que utilizam Wine, Proton ou SDL frequentemente solicitam inibição de atalhos (`keyboard-shortcuts-inhibit`) ou captura exclusiva de entrada. Modificadores convencionais como `Alt` ou `Ctrl` podem ser capturados pelo jogo antes de chegar ao compositor. Atalhos que utilizam o modificador privilegiado do compositor (`Mod`) têm prioridade garantida no Niri e são processados antes do encaminhamento ao cliente gráfico, assegurando que o painel abra de forma imediata e sem conflitos durante partidas.
+
+O plugin também registra um quick tile (`[[shortcut]]`) acessível na central de ações do Noctalia Shell (`Mod+S`), permitindo alternar a visibilidade do painel e acompanhar o status do hardware e o perfil ativo.
 
 ### Detecção Automática e Perfis por Jogo
 
-O serviço de segundo plano (`prisma_service.luau`) consulta periodicamente a janela em foco no Niri (`niri msg --json focused-window`) de forma assíncrona, associando o identificador do executável (`app_id`) a perfis de calibragem pré-configurados:
+O serviço de segundo plano (`prisma_service.luau`) consulta periodicamente a lista completa de janelas da sessão no Niri (`niri msg --json windows`) de forma assíncrona, identificando tanto a janela ativa (`is_focused == true`) quanto as demais aplicações em execução:
 
-- **Persistência de Regras:** As vinculações entre aplicativos e perfis são salvas em `~/.config/prisma/app_rules.json`.
-- **Transição Atômica:** Ao focar em um jogo mapeado (ex.: `cs2`), o estado atual de calibragem da área de trabalho é preservado em memória como `fallback_state` e o perfil vinculado é aplicado diretamente ao hardware.
+- **Lista Dinâmica de Janelas Abertas:** Descobre todas as janelas ativas na sessão (filtrando componentes internos do shell) e expõe a lista `openApps` ordenada (janela em foco em primeiro lugar, seguida pelas demais). Isso permite vincular jogos em tela cheia mesmo que o usuário tenha alternado temporariamente de janela para abrir o painel.
+- **Persistência de Regras:** As vinculações entre aplicativos (`app_id`) e perfis são salvas em `~/.config/prisma/app_rules.json`.
+- **Transição Atômica:** Ao alternar o foco para um jogo mapeado, o estado atual de calibragem da área de trabalho é preservado em memória como `fallback_state` e o perfil vinculado é aplicado diretamente ao hardware.
 - **Restauração Automática:** Ao alternar para a área de trabalho ou para qualquer aplicativo sem regra vinculada, o serviço restaura automaticamente os parâmetros anteriores de saturação, contraste e brilho.
-- **Configuração Visual:** Na aba **Perfis**, o usuário pode habilitar ou desabilitar a troca automática, visualizar a janela em foco detectada pelo compositor e vincular o perfil desejado com um clique. Na aba **Tela & Cor**, um indicador informa quando um perfil automático está em execução.
+- **Configuração Visual:** Na aba **Perfis**, controles de navegação `<` / `>` e uma lista de seleção rápida permitem escolher qualquer janela aberta na sessão e vinculá-la ao perfil desejado com um clique. Na aba **Tela & Cor**, um indicador informa quando um perfil automático está em execução.
 
 ## 6. Referência da CLI (prisma-ctl)
 
