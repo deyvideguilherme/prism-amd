@@ -2,15 +2,23 @@
 
 pkgname=prisma-control-center
 pkgver=1.0.0
-pkgrel=1
+pkgrel=2
 pkgdesc="Hardware display color calibration and telemetry for AMD GPUs on Noctalia Shell (Niri / Wayland)"
 arch=('x86_64')
-url="https://github.com/deyvideguilherme/chroma-layer"
-license=('MIT')
-depends=('dkms' 'libdrm')
-makedepends=('cmake' 'make')
+url="https://github.com/deyvideguilherme/prism-amd"
+license=('MIT' 'GPL-2.0-only')
+depends=('dkms' 'glibc' 'gcc-libs')
+makedepends=('cmake' 'gcc' 'make')
 optdepends=(
-    'noctalia-shell: for the desktop control center visual plugin'
+    'noctalia: for the desktop control center visual plugin'
+    'linux-headers: to build the module for Arch Linux'
+    'linux-lts-headers: to build the module for Arch Linux LTS'
+    'linux-cachyos-headers: to build the module for CachyOS'
+    'linux-cachyos-lts-headers: to build the module for CachyOS LTS'
+    'clang: DKMS toolchain for kernels built with Clang'
+    'llvm: DKMS toolchain for kernels built with Clang'
+    'lld: DKMS linker for kernels built with Clang'
+    'pahole: external module BTF generation when the kernel headers require it'
 )
 provides=('chroma-amd-dkms' 'prisma-ctl')
 conflicts=('chroma-amd-dkms')
@@ -35,7 +43,11 @@ build() {
     cmake -B "$srcdir/build" -S "$_root" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr
-    cmake --build "$srcdir/build" --target prisma-ctl
+    cmake --build "$srcdir/build"
+}
+
+check() {
+    ctest --test-dir "$srcdir/build" --output-on-failure
 }
 
 package() {
@@ -43,7 +55,7 @@ package() {
     _root="$(_get_project_root)"
 
     # 1. CLI binary
-    install -Dm755 "$srcdir/build/prisma-ctl" "$pkgdir/usr/bin/prisma-ctl"
+    DESTDIR="$pkgdir" cmake --install "$srcdir/build"
 
     # 2. DKMS module source
     local _dkms_dir="$pkgdir/usr/src/chroma-amd-$pkgver"

@@ -8,239 +8,139 @@ project(prisma
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Find libdrm via pkg-config for the DRM/KMS hardware backend
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(DRM REQUIRED libdrm)
+include(CTest)
+option(PRISMA_BUILD_LEGACY_DRM "Build the experimental DRM LD_PRELOAD library" OFF)
+option(PRISMA_BUILD_LEGACY_VULKAN "Build the experimental Vulkan layer and shader" OFF)
 
-# Vulkan Headers (locate on system or fetch from official Khronos repository)
-find_package(VulkanHeaders QUIET)
-if(NOT VulkanHeaders_FOUND)
-    find_package(Vulkan QUIET)
+add_library(prisma_cli STATIC
+    src/cli/device.cpp
+    src/cli/telemetry.cpp
+    src/cli/profiles.cpp
+    src/cli/doctor.cpp
+)
+target_include_directories(prisma_cli PUBLIC src kernel)
+
+add_executable(prisma-ctl src/cli/main.cpp)
+target_link_libraries(prisma-ctl PRIVATE prisma_cli)
+
+include(GNUInstallDirs)
+install(TARGETS prisma-ctl RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+
+if(BUILD_TESTING)
+    find_package(Threads REQUIRED)
+    add_executable(test_cli tests/test_cli.cpp)
+    target_link_libraries(test_cli PRIVATE prisma_cli Threads::Threads)
+    target_compile_options(test_cli PRIVATE -UNDEBUG)
+    add_test(NAME test_cli COMMAND test_cli)
+
+    add_executable(test_kernel_abi EXCLUDE_FROM_ALL tests/test_kernel_abi.cpp)
+    target_include_directories(test_kernel_abi PRIVATE kernel)
+    target_link_libraries(test_kernel_abi PRIVATE Threads::Threads)
 endif()
 
-if(TARGET Vulkan::Headers)
-    set(VULKAN_TARGET Vulkan::Headers)
-elseif(TARGET Vulkan::Vulkan)
-    set(VULKAN_TARGET Vulkan::Vulkan)
-else()
-    include(FetchContent)
-    message(STATUS "Vulkan Headers not found locally. Downloading official Khronos headers...")
-    set(VULKAN_HEADERS_ENABLE_MODULE OFF CACHE BOOL "" FORCE)
-    set(VULKAN_HEADERS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
-    set(VULKAN_HEADERS_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
-    set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
-    FetchContent_Declare(
-        VulkanHeaders
-        GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
-        GIT_TAG v1.3.296
-        GIT_SHALLOW TRUE
-    )
-    FetchContent_MakeAvailable(VulkanHeaders)
-    set(VULKAN_TARGET Vulkan::Headers)
-endif()
+set(LOCAL_BIN_DIR "$ENV{HOME}/.local/bin")
+set(LOCAL_LIB_DIR "$ENV{HOME}/.local/lib")
+set(LOCAL_LAYER_DIR "$ENV{HOME}/.local/share/vulkan/implicit_layer.d")
 
-# Locate SPIR-V shader compiler
-find_program(GLSLANG_VALIDATOR NAMES glslangValidator)
-find_program(GLSLC NAMES glslc)
+add_custom_target(install-local
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${LOCAL_BIN_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:prisma-ctl>" "${LOCAL_BIN_DIR}/prisma-ctl"
+    DEPENDS prisma-ctl
+    VERBATIM
+)
+add_custom_target(uninstall-local
+    COMMAND ${CMAKE_COMMAND} -E rm -f "${LOCAL_BIN_DIR}/prisma-ctl"
+    VERBATIM
+)
 
-set(SHADER_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/shader.comp")
-set(SHADER_SPV "${CMAKE_CURRENT_BINARY_DIR}/shader.spv")
-set(SHADER_H "${CMAKE_CURRENT_BINARY_DIR}/shader_spv.h")
+if(PRISMA_BUILD_LEGACY_DRM)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(DRM REQUIRED IMPORTED_TARGET libdrm)
 
-if(GLSLANG_VALIDATOR)
-    message(STATUS "Selected GLSL compiler: glslangValidator (${GLSLANG_VALIDATOR})")
-    add_custom_command(
-        OUTPUT "${SHADER_SPV}" "${SHADER_H}"
-        COMMAND "${GLSLANG_VALIDATOR}" -V "${SHADER_SRC}" -o "${SHADER_SPV}"
-        COMMAND "${GLSLANG_VALIDATOR}" -V --vn chroma_shader_spv "${SHADER_SRC}" -o "${SHADER_H}"
-        DEPENDS "${SHADER_SRC}"
-        COMMENT "Compiling compute shader (${SHADER_SRC}) -> SPIR-V and C++ header"
+    add_library(chroma_drm SHARED src/drm_hook.cpp src/drm_ctm.cpp)
+    target_link_libraries(chroma_drm PRIVATE PkgConfig::DRM ${CMAKE_DL_LIBS})
+
+    if(BUILD_TESTING)
+        add_executable(test_ctm tests/test_ctm.cpp src/drm_ctm.cpp)
+        target_include_directories(test_ctm PRIVATE src)
+        target_link_libraries(test_ctm PRIVATE PkgConfig::DRM)
+        target_compile_options(test_ctm PRIVATE -UNDEBUG)
+        add_test(NAME test_ctm COMMAND test_ctm)
+
+        add_executable(test_vkms_ctm EXCLUDE_FROM_ALL tests/test_vkms_ctm.cpp)
+        target_link_libraries(test_vkms_ctm PRIVATE PkgConfig::DRM)
+    endif()
+
+    add_custom_target(install-legacy-drm
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${LOCAL_LIB_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:chroma_drm>" "${LOCAL_LIB_DIR}/libchroma_drm.so"
+        DEPENDS chroma_drm
         VERBATIM
     )
-elseif(GLSLC)
-    message(STATUS "Selected GLSL compiler: glslc (${GLSLC})")
+    add_dependencies(install-local install-legacy-drm)
+    add_custom_command(TARGET uninstall-local POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -f "${LOCAL_LIB_DIR}/libchroma_drm.so"
+        VERBATIM
+    )
+endif()
+
+if(PRISMA_BUILD_LEGACY_VULKAN)
+    find_path(VULKAN_INCLUDE_DIR vulkan/vulkan.h REQUIRED)
+    find_program(GLSLANG_VALIDATOR NAMES glslangValidator)
+    find_program(GLSLC NAMES glslc)
+    set(SHADER_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/shader.comp")
+    set(SHADER_SPV "${CMAKE_CURRENT_BINARY_DIR}/shader.spv")
+    set(SHADER_H "${CMAKE_CURRENT_BINARY_DIR}/shader_spv.h")
+    set(BIN2C "${CMAKE_CURRENT_SOURCE_DIR}/cmake/bin2c.cmake")
+
+    if(GLSLANG_VALIDATOR)
+        set(SHADER_COMPILER "${GLSLANG_VALIDATOR}" -V)
+    elseif(GLSLC)
+        set(SHADER_COMPILER "${GLSLC}")
+    else()
+        message(FATAL_ERROR "The Vulkan layer requires glslangValidator or glslc.")
+    endif()
+
     add_custom_command(
         OUTPUT "${SHADER_SPV}"
-        COMMAND "${GLSLC}" "${SHADER_SRC}" -o "${SHADER_SPV}"
+        COMMAND ${SHADER_COMPILER} "${SHADER_SRC}" -o "${SHADER_SPV}"
         DEPENDS "${SHADER_SRC}"
-        COMMENT "Compiling compute shader (${SHADER_SRC}) -> SPIR-V"
         VERBATIM
     )
     add_custom_command(
         OUTPUT "${SHADER_H}"
-        COMMAND ${CMAKE_COMMAND}
-            -DINPUT_FILE="${SHADER_SPV}"
-            -DOUTPUT_FILE="${SHADER_H}"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/bin2c.cmake"
-        DEPENDS "${SHADER_SPV}"
-        COMMENT "Generating C++ header from SPIR-V shader"
+        COMMAND "${CMAKE_COMMAND}" "-DINPUT_FILE=${SHADER_SPV}" "-DOUTPUT_FILE=${SHADER_H}" -P "${BIN2C}"
+        DEPENDS "${SHADER_SPV}" "${BIN2C}"
         VERBATIM
     )
-else()
-    message(FATAL_ERROR "No shader compiler found! Please install glslang (glslangValidator) or shaderc (glslc).")
+    add_custom_target(compile_shaders DEPENDS "${SHADER_SPV}" "${SHADER_H}")
+    add_library(VkLayer_chroma SHARED src/layer.cpp "${SHADER_H}")
+    add_dependencies(VkLayer_chroma compile_shaders)
+    target_include_directories(VkLayer_chroma PRIVATE "${VULKAN_INCLUDE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
+
+    set(CHROMA_LAYER_PATH "${LOCAL_LIB_DIR}/libVkLayer_chroma.so")
+    configure_file(VkLayer_chroma.json.in VkLayer_chroma.json @ONLY)
+    add_custom_target(install-legacy-vulkan
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${LOCAL_LIB_DIR}" "${LOCAL_LAYER_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:VkLayer_chroma>" "${CHROMA_LAYER_PATH}"
+        COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_BINARY_DIR}/VkLayer_chroma.json" "${LOCAL_LAYER_DIR}/VkLayer_chroma.json"
+        DEPENDS VkLayer_chroma
+        VERBATIM
+    )
+    add_dependencies(install-local install-legacy-vulkan)
+    add_custom_command(TARGET uninstall-local POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -f "${CHROMA_LAYER_PATH}" "${LOCAL_LAYER_DIR}/VkLayer_chroma.json"
+        VERBATIM
+    )
 endif()
 
-# Target to force shader compilation
-add_custom_target(compile_shaders DEPENDS "${SHADER_SPV}" "${SHADER_H}")
-
-# ==============================================================================
-# 1. Vulkan Implicit Layer (libVkLayer_chroma.so)
-# ==============================================================================
-add_library(VkLayer_chroma SHARED
-    src/layer.cpp
-    "${SHADER_H}"
-)
-
-add_dependencies(VkLayer_chroma compile_shaders)
-
-target_include_directories(VkLayer_chroma PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    "${CMAKE_CURRENT_BINARY_DIR}"
-)
-
-target_link_libraries(VkLayer_chroma PRIVATE
-    ${VULKAN_TARGET}
-)
-
-set_target_properties(VkLayer_chroma PROPERTIES
-    OUTPUT_NAME "VkLayer_chroma"
-    PREFIX "lib"
-)
-
-# ==============================================================================
-# 2. Interceptor Library (libchroma_drm.so) for DRM/KMS Hardware CTM
-# ==============================================================================
-add_library(chroma_drm SHARED
-    src/drm_hook.cpp
-    src/drm_ctm.cpp
-)
-
-target_include_directories(chroma_drm PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    ${DRM_INCLUDE_DIRS}
-)
-
-target_link_libraries(chroma_drm PRIVATE
-    ${DRM_LIBRARIES}
-    ${CMAKE_DL_LIBS}
-)
-
-set_target_properties(chroma_drm PROPERTIES
-    OUTPUT_NAME "chroma_drm"
-    PREFIX "lib"
-)
-
-# ==============================================================================
-# 3. Unit Tests & Verification Binaries (test_ctm, test_cli)
-# ==============================================================================
-add_executable(test_ctm
-    tests/test_ctm.cpp
-    src/drm_ctm.cpp
-)
-
-target_include_directories(test_ctm PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    ${DRM_INCLUDE_DIRS}
-)
-
-target_link_libraries(test_ctm PRIVATE
-    ${DRM_LIBRARIES}
-)
-
-# CLI & Telemetry Unit Tests
-add_executable(test_cli
-    tests/test_cli.cpp
-    src/cli/device.cpp
-    src/cli/telemetry.cpp
-    src/cli/profiles.cpp
-    src/cli/doctor.cpp
-)
-
-target_include_directories(test_cli PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    "${CMAKE_CURRENT_SOURCE_DIR}/kernel"
-)
-
-enable_testing()
-add_test(NAME test_ctm COMMAND test_ctm)
-add_test(NAME test_cli COMMAND test_cli)
-
-# ==============================================================================
-# 4. CLI Tool (prisma-ctl)
-# ==============================================================================
-add_executable(prisma-ctl
-    src/cli/main.cpp
-    src/cli/device.cpp
-    src/cli/telemetry.cpp
-    src/cli/profiles.cpp
-    src/cli/doctor.cpp
-)
-
-target_include_directories(prisma-ctl PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    "${CMAKE_CURRENT_SOURCE_DIR}/kernel"
-)
-
-# ==============================================================================
-# User Local Installation
-# ==============================================================================
-set(LOCAL_BIN_DIR "$ENV{HOME}/.local/bin")
-set(LOCAL_LIB_DIR "$ENV{HOME}/.local/lib")
-set(LOCAL_LAYER_DIR "$ENV{HOME}/.local/share/vulkan/implicit_layer.d")
-set(PRISMA_CTL_PATH "${LOCAL_BIN_DIR}/prisma-ctl")
-set(CHROMA_LAYER_PATH "${LOCAL_LIB_DIR}/libVkLayer_chroma.so")
-set(CHROMA_DRM_PATH "${LOCAL_LIB_DIR}/libchroma_drm.so")
-set(CHROMA_JSON_PATH "${LOCAL_LAYER_DIR}/VkLayer_chroma.json")
-
-# Configure JSON manifest with absolute path to installed library
-configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/VkLayer_chroma.json.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/VkLayer_chroma.json"
-    @ONLY
-)
-
-# Target: install-local
-add_custom_target(install-local
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${LOCAL_BIN_DIR}"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${LOCAL_LIB_DIR}"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${LOCAL_LAYER_DIR}"
-    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:prisma-ctl>" "${PRISMA_CTL_PATH}"
-    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:VkLayer_chroma>" "${CHROMA_LAYER_PATH}"
-    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:chroma_drm>" "${CHROMA_DRM_PATH}"
-    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_BINARY_DIR}/VkLayer_chroma.json" "${CHROMA_JSON_PATH}"
-    DEPENDS VkLayer_chroma chroma_drm prisma-ctl
-    COMMENT "Installing prisma-ctl to ${LOCAL_BIN_DIR}, libraries to ${LOCAL_LIB_DIR} and manifest to ${CHROMA_JSON_PATH}"
-    VERBATIM
-)
-
-# Target: uninstall-local
-add_custom_target(uninstall-local
-    COMMAND ${CMAKE_COMMAND} -E remove -f "${PRISMA_CTL_PATH}"
-    COMMAND ${CMAKE_COMMAND} -E remove -f "${CHROMA_LAYER_PATH}"
-    COMMAND ${CMAKE_COMMAND} -E remove -f "${CHROMA_DRM_PATH}"
-    COMMAND ${CMAKE_COMMAND} -E remove -f "${CHROMA_JSON_PATH}"
-    COMMENT "Removing local installation of prisma binaries, libraries and manifest"
-    VERBATIM
-)
-
-# ==============================================================================
-# 5. Noctalia Shell Plugin (Prisma Control Center)
-# ==============================================================================
 set(NOCTALIA_PLUGIN_DIR "$ENV{HOME}/.local/state/noctalia/plugins/materialized/deyvideguilherme/prisma")
-
-# Target: install-ui
 add_custom_target(install-ui
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${NOCTALIA_PLUGIN_DIR}"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/ui/prisma" "${NOCTALIA_PLUGIN_DIR}"
-    COMMENT "Installing Prisma Control Center plugin to ${NOCTALIA_PLUGIN_DIR}"
     VERBATIM
 )
-
-# Target: uninstall-ui
 add_custom_target(uninstall-ui
-    COMMAND ${CMAKE_COMMAND} -E remove_directory "${NOCTALIA_PLUGIN_DIR}"
-    COMMENT "Removing Prisma Control Center plugin from ${NOCTALIA_PLUGIN_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${NOCTALIA_PLUGIN_DIR}"
     VERBATIM
 )
