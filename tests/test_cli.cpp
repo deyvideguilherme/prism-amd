@@ -26,6 +26,21 @@ void test_device_parser() {
     assert(state.contrast == 120);
     assert(state.brightness == -15);
 
+    // Test buffer parsing with explicit abi_version
+    std::string mock_dev_abi =
+        "abi_version=1\n"
+        "enabled=1\n"
+        "saturation=150\n"
+        "contrast=110\n"
+        "brightness=5\n";
+
+    DeviceState state_abi = parse_state_buffer(mock_dev_abi);
+    assert(state_abi.abi_version == 1);
+    assert(state_abi.enabled == 1);
+    assert(state_abi.saturation == 150);
+    assert(state_abi.contrast == 110);
+    assert(state_abi.brightness == 5);
+
     // Test parameter validation
     validate_parameter("saturation", 0);
     validate_parameter("saturation", 400);

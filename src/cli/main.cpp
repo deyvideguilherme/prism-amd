@@ -1,6 +1,8 @@
 #include "device.hpp"
 #include "telemetry.hpp"
 #include "profiles.hpp"
+#include "doctor.hpp"
+#include "prisma_abi.h"
 
 #include <iostream>
 #include <vector>
@@ -17,11 +19,13 @@ void print_help(const char* prog) {
               << "  " << prog << " set [options]                  Adjust hardware color parameters\n"
               << "  " << prog << " telemetry [--json]             Show AMD GPU telemetry sensors\n"
               << "  " << prog << " profile <action> [name]        Manage saved color profiles\n"
+              << "  " << prog << " doctor                         Run system and hardware self-diagnostics\n"
+              << "  " << prog << " --version | -v                 Show version and protocol ABI information\n"
               << "  " << prog << " --help | -h                    Show this help message\n\n"
               << "Set Options:\n"
               << "  -s, --saturation <0..400>   Set saturation (Digital Vibrance, default 100)\n"
               << "  -c, --contrast <10..300>    Set contrast factor (default 100)\n"
-              << "  -b, --brightness <-100..100> Set brightness offset (GAMMA_LUT, default 0)\n"
+              << "  -b, --brightness <-100..100> Set linear brightness gain (default 0)\n"
               << "  -e, --enabled <0|1>         Enable (1) or disable (0) hardware color injection\n\n"
               << "Profile Actions:\n"
               << "  save <name>                 Save current parameters to ~/.config/prisma/profiles/<name>.conf\n"
@@ -33,6 +37,7 @@ void print_help(const char* prog) {
               << "  " << prog << " set -s 160 -c 115\n"
               << "  " << prog << " profile save gaming\n"
               << "  " << prog << " profile apply gaming\n"
+              << "  " << prog << " doctor\n"
               << "  " << prog << " status --json\n";
 }
 
@@ -56,7 +61,7 @@ int handle_status(bool json_output) {
                       << "Enabled:            " << (state.enabled ? "yes" : "no") << "\n"
                       << "Saturation:         " << state.saturation << " % (Rec.709 CTM)\n"
                       << "Contrast:           " << state.contrast << " %\n"
-                      << "Brightness:         " << state.brightness << " % (GAMMA_LUT)\n\n"
+                      << "Brightness:         " << state.brightness << " % (CTM linear gain)\n\n"
                       << "=== AMD GPU Hardware Telemetry ===\n"
                       << prisma::format_telemetry_text(telem);
         }
@@ -222,6 +227,15 @@ int main(int argc, char* argv[]) {
     if (cmd == "--help" || cmd == "-h" || cmd == "help") {
         print_help(argv[0]);
         return 0;
+    }
+
+    if (cmd == "--version" || cmd == "-v" || cmd == "version") {
+        std::cout << "prisma-ctl " << PRISMA_VERSION << " (ABI v" << PRISMA_ABI_VERSION << ")\n";
+        return 0;
+    }
+
+    if (cmd == "doctor") {
+        return prisma::run_doctor();
     }
 
     if (cmd == "status") {

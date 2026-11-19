@@ -1,7 +1,7 @@
 # Maintainer: Deyvide Guilherme <deyvide.roza@gmail.com>
 
 pkgname=prisma-control-center
-pkgver=0.1.0
+pkgver=1.0.0
 pkgrel=1
 pkgdesc="Hardware display color calibration and telemetry for AMD GPUs on Noctalia Shell (Niri / Wayland)"
 arch=('x86_64')
@@ -49,6 +49,7 @@ package() {
     local _dkms_dir="$pkgdir/usr/src/chroma-amd-$pkgver"
     install -dm755 "$_dkms_dir"
     install -m644 "$_root/kernel/chroma_amd.c" "$_dkms_dir/"
+    install -m644 "$_root/kernel/prisma_abi.h" "$_dkms_dir/"
     install -m644 "$_root/kernel/Makefile" "$_dkms_dir/"
     install -m644 "$_root/kernel/dkms.conf" "$_dkms_dir/"
 

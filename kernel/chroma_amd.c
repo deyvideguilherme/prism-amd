@@ -33,10 +33,12 @@
 #include <drm/drm_property.h>
 #include <drm/drm_mode.h>
 
+#include "prisma_abi.h"
+
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("prism-amd Contributors");
 MODULE_DESCRIPTION("Hardware Linear CTM Interceptor for AMDGPU DRM/KMS");
-MODULE_VERSION("1.3.0");
+MODULE_VERSION(PRISMA_VERSION);
 
 /*
  * Kernel compatibility:
@@ -167,15 +169,16 @@ static void chroma_recalc_ctm(void)
  */
 static ssize_t chroma_dev_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
-	char msg[128];
+	char msg[160];
 	int len;
 
 	len = scnprintf(msg, sizeof(msg),
+			"abi_version=%d\n"
 			"enabled=%d\n"
 			"saturation=%d\n"
 			"contrast=%d\n"
 			"brightness=%d\n",
-			g_enabled, g_saturation, g_contrast, g_brightness);
+			PRISMA_ABI_VERSION, g_enabled, g_saturation, g_contrast, g_brightness);
 
 	return simple_read_from_buffer(buf, count, ppos, msg, len);
 }
@@ -243,10 +246,63 @@ static ssize_t chroma_dev_write(struct file *file, const char __user *buf, size_
 	return count;
 }
 
+static long chroma_dev_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+	switch (cmd) {
+	case PRISMA_IOC_GET_ABI: {
+		uint32_t abi = PRISMA_ABI_VERSION;
+		if (copy_to_user((void __user *)arg, &abi, sizeof(abi)))
+			return -EFAULT;
+		return 0;
+	}
+	case PRISMA_IOC_GET_STATE: {
+		struct prisma_ioctl_state st;
+		st.abi_version = PRISMA_ABI_VERSION;
+		st.enabled = g_enabled;
+		st.saturation = g_saturation;
+		st.contrast = g_contrast;
+		st.brightness = g_brightness;
+		if (copy_to_user((void __user *)arg, &st, sizeof(st)))
+			return -EFAULT;
+		return 0;
+	}
+	case PRISMA_IOC_SET_STATE: {
+		struct prisma_ioctl_state st;
+		if (copy_from_user(&st, (void __user *)arg, sizeof(st)))
+			return -EFAULT;
+		if (st.abi_version != PRISMA_ABI_VERSION)
+			return -EPROTO;
+		if (st.saturation < 0 || st.saturation > 400)
+			return -EINVAL;
+		if (st.contrast < 10 || st.contrast > 300)
+			return -EINVAL;
+		if (st.brightness < -100 || st.brightness > 100)
+			return -EINVAL;
+		if (st.enabled != 0 && st.enabled != 1)
+			return -EINVAL;
+
+		g_saturation = st.saturation;
+		g_contrast = st.contrast;
+		g_brightness = st.brightness;
+		g_enabled = st.enabled;
+
+		chroma_recalc_ctm();
+		atomic_inc(&config_generation);
+		return 0;
+	}
+	default:
+		return -ENOTTY;
+	}
+}
+
 static const struct file_operations chroma_fops = {
 	.owner = THIS_MODULE,
 	.read = chroma_dev_read,
 	.write = chroma_dev_write,
+	.unlocked_ioctl = chroma_dev_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl = chroma_dev_ioctl,
+#endif
 	.llseek = default_llseek,
 };
 
@@ -260,6 +316,12 @@ static struct miscdevice chroma_misc_dev = {
 /*
  * Sysfs Read-Only Telemetry (/sys/kernel/chroma_amd/)
  */
+static ssize_t abi_version_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%d\n", PRISMA_ABI_VERSION);
+}
+static struct kobj_attribute abi_version_attr = __ATTR_RO(abi_version);
+
 static ssize_t saturation_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
 	return sysfs_emit(buf, "%d\n", g_saturation);
@@ -285,6 +347,7 @@ static ssize_t enabled_show(struct kobject *kobj, struct kobj_attribute *attr, c
 static struct kobj_attribute enabled_attr = __ATTR_RO(enabled);
 
 static struct attribute *chroma_attrs[] = {
+	&abi_version_attr.attr,
 	&saturation_attr.attr,
 	&contrast_attr.attr,
 	&brightness_attr.attr,
@@ -297,6 +360,19 @@ static const struct attribute_group chroma_attr_group = {
 };
 
 static struct kobject *chroma_kobj;
+
+/*
+ * Returns true if any CRTC currently has a chroma-injected CTM blob applied.
+ */
+static bool chroma_has_active_injections(void)
+{
+	int idx;
+	for (idx = 0; idx < MAX_CRTCS; ++idx) {
+		if (g_crtc_applied_ctm_gen[idx] != 0)
+			return true;
+	}
+	return false;
+}
 
 /*
  * Kprobe handler intercepting drm_atomic_helper_commit
@@ -355,7 +431,16 @@ static int chroma_pre_handler(struct kprobe *p, struct pt_regs *regs)
 			}
 		}
 	} else {
-		/* enabled == 0 or identity: clean up custom CTM if active */
+		/*
+		 * When disabled (enabled == 0) or identity:
+		 * If no chroma injection is active, return immediately without touching
+		 * any CRTC state. This strictly guarantees that external CTM matrices configured
+		 * by the compositor (night light, ICC profiles, HDR) are NEVER overwritten.
+		 */
+		if (!chroma_has_active_injections())
+			return 0;
+
+		/* Only clean up CRTCs where our module previously injected a custom CTM */
 		for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
 			unsigned int idx;
 
@@ -366,7 +451,7 @@ static int chroma_pre_handler(struct kprobe *p, struct pt_regs *regs)
 			if (idx >= MAX_CRTCS)
 				continue;
 
-			if (new_crtc_state->ctm && g_crtc_applied_ctm_gen[idx] != 0) {
+			if (g_crtc_applied_ctm_gen[idx] != 0) {
 				drm_property_replace_blob(&new_crtc_state->ctm, NULL);
 				new_crtc_state->color_mgmt_changed = true;
 				g_crtc_applied_ctm_gen[idx] = 0;

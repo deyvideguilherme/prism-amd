@@ -1,5 +1,7 @@
 #pragma once
 
+#include "prisma_abi.h"
+
 #include <string>
 #include <string_view>
 #include <optional>
@@ -12,6 +14,7 @@ struct DeviceState {
     int contrast = 100;
     int brightness = 0;
     int enabled = 1;
+    int abi_version = PRISMA_ABI_VERSION;
 
     bool operator==(const DeviceState& other) const = default;
 };
@@ -35,10 +38,13 @@ std::string format_write_command(
     const std::optional<int>& enabled
 );
 
-// Reads device state from /dev/chroma_amd using POSIX I/O
+// Validates ABI compatibility with /dev/chroma_amd
+void check_device_abi(int fd, const std::string& dev_path = "/dev/chroma_amd");
+
+// Reads device state from /dev/chroma_amd using POSIX I/O and ioctl
 DeviceState read_device_state(const std::string& dev_path = "/dev/chroma_amd");
 
-// Writes parameters to /dev/chroma_amd using POSIX I/O
+// Writes parameters to /dev/chroma_amd using POSIX I/O and ioctl
 void write_device_params(
     const std::optional<int>& saturation,
     const std::optional<int>& contrast,
