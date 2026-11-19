@@ -2,7 +2,7 @@
 /*
  * chroma_amd.c - Linux Kernel Module for AMDGPU Hardware Color Acceleration (prism-amd)
  *
- * Injects Rec.709 Color Transformation Matrices (CTM) and GAMMA_LUT tables directly into
+ * Injects Rec.709 Color Transformation Matrices (CTM) directly into
  * the AMD Display Core Next (DCN) hardware pipeline by intercepting DRM atomic commits via kprobe.
  *
  * Device node: /dev/chroma_amd (character miscdevice, mode 0660, group video)
@@ -35,8 +35,8 @@
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("prism-amd Contributors");
-MODULE_DESCRIPTION("Hardware CTM and GAMMA_LUT Interceptor for AMDGPU DRM/KMS");
-MODULE_VERSION("1.2.0");
+MODULE_DESCRIPTION("Hardware Linear CTM Interceptor for AMDGPU DRM/KMS");
+MODULE_VERSION("1.3.0");
 
 /*
  * Kernel compatibility:
@@ -54,7 +54,6 @@ MODULE_VERSION("1.2.0");
 #define REC709_BW 722LL
 
 #define MAX_CRTCS 32
-#define MAX_GAMMA_LUT_SIZE 4096
 
 /* State tuning parameters */
 static int g_saturation = 100; // 0 to 400 (default 100 = 100%)
@@ -64,12 +63,18 @@ static int g_enabled = 1;      // 0 or 1 (default 1)
 
 static atomic_t config_generation = ATOMIC_INIT(1);
 static int g_crtc_applied_ctm_gen[MAX_CRTCS];
-static int g_crtc_applied_lut_gen[MAX_CRTCS];
-static bool g_crtc_lut_injected[MAX_CRTCS];
 
 static DEFINE_SPINLOCK(g_ctm_lock);
 static struct drm_color_ctm g_current_ctm;
-static struct drm_color_lut g_lut_buffer[MAX_GAMMA_LUT_SIZE];
+
+/*
+ * Returns true if current configuration matches identity transform
+ * (100% saturation, 100% contrast, 0% brightness).
+ */
+static inline bool chroma_is_identity(void)
+{
+	return (g_saturation == 100 && g_contrast == 100 && g_brightness == 0);
+}
 
 /*
  * Converts rational value (num / den) into 64-bit S31.32 sign-magnitude fixed-point
@@ -92,24 +97,38 @@ static u64 to_s31_32(s64 num, u64 den)
 
 	/* Scale magnitude by 2^32 with safe intermediate 128-bit division (no FPU) */
 	mag = mul_u64_u64_div_u64(abs_num, 1ULL << 32, den);
-	mag &= ((1ULL << 63) - 1);
+
+	/* Safe clamp to S31.32 maximum magnitude (bits 0..62) */
+	if (mag > ((1ULL << 63) - 1))
+		mag = (1ULL << 63) - 1;
 
 	return sign | mag;
 }
 
 /*
- * Recalculates the 3x3 Rec.709 CTM matrix using strictly 64-bit integer arithmetic
+ * Computes the 3x3 Rec.709 CTM matrix incorporating saturation, contrast,
+ * and linear brightness gain using strictly 64-bit integer arithmetic.
+ *
+ * Brightness (-100 to 100) is applied as a proportional linear gain factor:
+ * - brightness = -100 -> gain_q16 = 16384  (0.25x)
+ * - brightness =    0 -> gain_q16 = 65536  (1.00x)
+ * - brightness = +100 -> gain_q16 = 114688 (1.75x)
+ * Formula: gain_q16 = 65536 + div_s64(brightness * 49152, 100)
  */
-static void chroma_recalc_ctm(void)
+static void chroma_compute_ctm(struct drm_color_ctm *ctm, int sat_val, int con_val, int bri_val)
 {
-	s64 sat = (s64)g_saturation;
-	s64 contrast = (s64)g_contrast;
+	s64 sat = (s64)sat_val;
+	s64 contrast = (s64)con_val;
+	s64 brightness = (s64)bri_val;
 	s64 one_minus_s = 100LL - sat;
 	s64 weights[3] = { REC709_RW, REC709_GW, REC709_BW };
-	s64 den = 100000000LL; /* 100 (sat) * 10000 (luma) * 100 (contrast) */
-	struct drm_color_ctm new_ctm;
+	s64 gain_q16;
+	s64 den = 100000000LL * 65536LL; /* 100 (sat) * 10000 (luma) * 100 (contrast) * 65536 (gain_q16) */
 	int r, c;
-	unsigned long flags;
+
+	gain_q16 = 65536LL + div_s64(brightness * 49152LL, 100LL);
+	if (gain_q16 < 0)
+		gain_q16 = 0;
 
 	for (r = 0; r < 3; ++r) {
 		for (c = 0; c < 3; ++c) {
@@ -121,40 +140,26 @@ static void chroma_recalc_ctm(void)
 			else
 				val = (one_minus_s * w) * contrast;
 
-			new_ctm.matrix[r * 3 + c] = to_s31_32(val, den);
+			val = val * gain_q16;
+
+			ctm->matrix[r * 3 + c] = to_s31_32(val, den);
 		}
 	}
+}
+
+/*
+ * Recalculates current CTM from active tuning parameters
+ */
+static void chroma_recalc_ctm(void)
+{
+	struct drm_color_ctm new_ctm;
+	unsigned long flags;
+
+	chroma_compute_ctm(&new_ctm, g_saturation, g_contrast, g_brightness);
 
 	spin_lock_irqsave(&g_ctm_lock, flags);
 	memcpy(&g_current_ctm, &new_ctm, sizeof(new_ctm));
 	spin_unlock_irqrestore(&g_ctm_lock, flags);
-}
-
-/*
- * Generates hardware GAMMA_LUT for brightness adjustment using strictly 64-bit integer arithmetic.
- * Maps brightness (-100 to 100) to a 16-bit offset (-16384 to +16384).
- */
-static void chroma_generate_gamma_lut(struct drm_color_lut *lut, u32 size, int brightness)
-{
-	u32 i;
-	s64 b_offset;
-
-	b_offset = div_s64((s64)brightness * 16384LL, 100LL);
-
-	for (i = 0; i < size; ++i) {
-		u64 base = div_u64((u64)i * 65535ULL, (u64)(size - 1));
-		s64 val = (s64)base + b_offset;
-
-		if (val < 0)
-			val = 0;
-		else if (val > 65535)
-			val = 65535;
-
-		lut[i].red = (u16)val;
-		lut[i].green = (u16)val;
-		lut[i].blue = (u16)val;
-		lut[i].reserved = 0;
-	}
 }
 
 /*
@@ -322,7 +327,7 @@ static int chroma_pre_handler(struct kprobe *p, struct pt_regs *regs)
 	enabled = g_enabled;
 	cur_gen = atomic_read(&config_generation);
 
-	if (enabled == 1) {
+	if (enabled == 1 && !chroma_is_identity()) {
 		spin_lock_irqsave(&g_ctm_lock, flags);
 		memcpy(&ctm_copy, &g_current_ctm, sizeof(ctm_copy));
 		spin_unlock_irqrestore(&g_ctm_lock, flags);
@@ -338,7 +343,7 @@ static int chroma_pre_handler(struct kprobe *p, struct pt_regs *regs)
 			if (idx >= MAX_CRTCS)
 				continue;
 
-			/* Apply CTM matrix */
+			/* Apply CTM matrix (combines saturation, contrast and linear brightness gain) */
 			if (g_crtc_applied_ctm_gen[idx] != cur_gen || !new_crtc_state->ctm) {
 				new_blob = drm_property_create_blob(dev, sizeof(struct drm_color_ctm), &ctm_copy);
 				if (!IS_ERR(new_blob)) {
@@ -348,43 +353,9 @@ static int chroma_pre_handler(struct kprobe *p, struct pt_regs *regs)
 					g_crtc_applied_ctm_gen[idx] = cur_gen;
 				}
 			}
-
-			/* Apply GAMMA_LUT for brightness if non-zero */
-			if (g_brightness != 0) {
-				u32 gamma_size = crtc->gamma_size;
-
-				if (gamma_size >= 2) {
-					if (gamma_size > MAX_GAMMA_LUT_SIZE)
-						gamma_size = MAX_GAMMA_LUT_SIZE;
-
-					if (g_crtc_applied_lut_gen[idx] != cur_gen || !new_crtc_state->gamma_lut) {
-						struct drm_property_blob *gamma_blob;
-
-						chroma_generate_gamma_lut(g_lut_buffer, gamma_size, g_brightness);
-						gamma_blob = drm_property_create_blob(dev,
-										      gamma_size * sizeof(struct drm_color_lut),
-										      g_lut_buffer);
-						if (!IS_ERR(gamma_blob)) {
-							drm_property_replace_blob(&new_crtc_state->gamma_lut, gamma_blob);
-							drm_property_blob_put(gamma_blob);
-							new_crtc_state->color_mgmt_changed = true;
-							g_crtc_applied_lut_gen[idx] = cur_gen;
-							g_crtc_lut_injected[idx] = true;
-						}
-					}
-				}
-			} else {
-				/* brightness == 0: restore gamma_lut if previously injected */
-				if (g_crtc_lut_injected[idx] && new_crtc_state->gamma_lut) {
-					drm_property_replace_blob(&new_crtc_state->gamma_lut, NULL);
-					new_crtc_state->color_mgmt_changed = true;
-					g_crtc_lut_injected[idx] = false;
-					g_crtc_applied_lut_gen[idx] = 0;
-				}
-			}
 		}
 	} else {
-		/* enabled == 0: clean up custom CTM and GAMMA_LUT if active */
+		/* enabled == 0 or identity: clean up custom CTM if active */
 		for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
 			unsigned int idx;
 
@@ -399,13 +370,6 @@ static int chroma_pre_handler(struct kprobe *p, struct pt_regs *regs)
 				drm_property_replace_blob(&new_crtc_state->ctm, NULL);
 				new_crtc_state->color_mgmt_changed = true;
 				g_crtc_applied_ctm_gen[idx] = 0;
-			}
-
-			if (new_crtc_state->gamma_lut && g_crtc_lut_injected[idx]) {
-				drm_property_replace_blob(&new_crtc_state->gamma_lut, NULL);
-				new_crtc_state->color_mgmt_changed = true;
-				g_crtc_lut_injected[idx] = false;
-				g_crtc_applied_lut_gen[idx] = 0;
 			}
 		}
 	}
