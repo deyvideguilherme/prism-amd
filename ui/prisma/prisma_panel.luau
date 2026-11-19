@@ -1,7 +1,7 @@
 --!nonstrict
 -- Prisma Control Center - Interactive Desktop Panel
 -- Visual control center featuring live hardware telemetry, DCN color calibration, and profile management.
--- Uses standard Noctalia native primitives (ui.column, ui.row, ui.label, ui.button, ui.progress, ui.input, ui.scroll).
+-- Uses standard Noctalia native primitives (ui.box, ui.column, ui.row, ui.label, ui.button, ui.progress, ui.input, ui.scroll).
 
 local currentTab = "performance" -- "performance" | "color" | "profiles"
 local newProfileName = ""
@@ -162,6 +162,33 @@ end
 
 -- ── Tab 2: Tela & Cor (DCN Color Adjustments) ────────────────────────────────
 
+local function interactiveBar(value, minVal, maxVal, isEnabled, onSelectValue)
+    local segments = {}
+    for i = 1, 25 do
+        local targetVal = math.floor(minVal + ((i - 1) / 24) * (maxVal - minVal) + 0.5)
+        local isFilled = (targetVal <= value)
+        local fill = if isFilled then (if isEnabled then "primary" else "outline_variant") else "surface_container_highest"
+
+        local onClick = function()
+            if not isEnabled then
+                return
+            end
+            onSelectValue(targetVal)
+            sendColorUpdate(true)
+            render()
+        end
+
+        table.insert(segments, ui.box({
+            height = 14,
+            flexGrow = 1,
+            radius = 3,
+            fill = fill,
+            onClick = onClick,
+        }))
+    end
+    return ui.row({ gap = 2, align = "center" }, segments)
+end
+
 local function colorView()
     local isEnabled = (localDevice.enabled == 1)
 
@@ -183,50 +210,51 @@ local function colorView()
         }),
     })
 
-    -- 2. Precision Parameter Block Helper
-    local function parameterBlock(title, subtitle, value, minVal, maxVal, progressVal, onSub10, onSub1, onAdd1, onAdd10, onReset, defaultVal)
-        return ui.column({ gap = 6, align = "stretch" }, {
-            ui.row({ align = "center", justify = "space_between" }, {
-                ui.column({ gap = 2 }, {
-                    ui.label({ text = title, fontSize = 13, fontWeight = "bold" }),
-                    ui.label({ text = subtitle, fontSize = 11, color = "on_surface_variant" }),
-                }),
-                ui.label({ text = `{value}%`, fontSize = 16, fontWeight = "bold", color = "primary" }),
-            }),
-            ui.progress({
-                height = 8,
-                radius = 4,
-                progress = progressVal,
-                fill = if isEnabled then "primary" else "on_surface_variant",
+    -- 2. Precision Parameter Block with Interactive Bar & Direct Input
+    local function parameterBlock(keyId, title, subtitle, value, minVal, maxVal, defaultVal, onSelectValue, onSub1, onAdd1, onReset)
+        local onSubmitInput = function(text)
+            if not isEnabled then
+                return
+            end
+            local trimmed = noctalia.string.trim(text)
+            if string.sub(trimmed, -1) == "%" then
+                trimmed = noctalia.string.trim(string.sub(trimmed, 1, -2))
+            end
+            local num = tonumber(trimmed)
+            if num ~= nil then
+                local clamped = clamp(math.floor(num + 0.5), minVal, maxVal)
+                onSelectValue(clamped)
+                sendColorUpdate(true)
+                render()
+            else
+                render()
+            end
+        end
+
+        local headerRow = ui.row({ align = "center", justify = "space_between" }, {
+            ui.column({ gap = 2, flexGrow = 1 }, {
+                ui.label({ text = title, fontSize = 13, fontWeight = "bold" }),
+                ui.label({ text = subtitle, fontSize = 11, color = "on_surface_variant" }),
             }),
             ui.row({ gap = 6, align = "center" }, {
-                ui.button({
-                    text = "-10",
-                    variant = "ghost",
-                    enabled = isEnabled and value > minVal,
-                    onClick = onSub10,
-                    flexGrow = 1,
+                ui.label({ text = `{value}%`, fontSize = 15, fontWeight = "bold", color = "primary" }),
+                ui.input({
+                    key = `input_{keyId}_{value}`,
+                    placeholder = tostring(value),
+                    width = 64,
+                    onSubmit = onSubmitInput,
                 }),
                 ui.button({
                     text = "-1",
                     variant = "ghost",
                     enabled = isEnabled and value > minVal,
                     onClick = onSub1,
-                    flexGrow = 1,
                 }),
                 ui.button({
                     text = "+1",
                     variant = "ghost",
                     enabled = isEnabled and value < maxVal,
                     onClick = onAdd1,
-                    flexGrow = 1,
-                }),
-                ui.button({
-                    text = "+10",
-                    variant = "ghost",
-                    enabled = isEnabled and value < maxVal,
-                    onClick = onAdd10,
-                    flexGrow = 1,
                 }),
                 ui.button({
                     glyph = "rotate",
@@ -238,51 +266,49 @@ local function colorView()
                 }),
             }),
         })
+
+        local bar = interactiveBar(value, minVal, maxVal, isEnabled, onSelectValue)
+
+        return ui.column({ gap = 8, align = "stretch" }, {
+            headerRow,
+            bar,
+        })
     end
 
-    local satProgress = clamp(localDevice.saturation / 400, 0, 1)
     local satBlock = parameterBlock(
+        "saturation",
         "Saturação",
         "Digital Vibrance em hardware Rec.709 (0..400%)",
         localDevice.saturation,
-        0, 400,
-        satProgress,
-        "onSaturationSub10",
+        0, 400, 100,
+        function(val) localDevice.saturation = clamp(val, 0, 400) end,
         "onSaturationSub1",
         "onSaturationAdd1",
-        "onSaturationAdd10",
-        "onSaturationReset",
-        100
+        "onSaturationReset"
     )
 
-    local conProgress = clamp((localDevice.contrast - 10) / (300 - 10), 0, 1)
     local conBlock = parameterBlock(
+        "contrast",
         "Contraste",
         "Fator de contraste linear da matriz CTM (10..300%)",
         localDevice.contrast,
-        10, 300,
-        conProgress,
-        "onContrastSub10",
+        10, 300, 100,
+        function(val) localDevice.contrast = clamp(val, 10, 300) end,
         "onContrastSub1",
         "onContrastAdd1",
-        "onContrastAdd10",
-        "onContrastReset",
-        100
+        "onContrastReset"
     )
 
-    local briProgress = clamp((localDevice.brightness + 100) / 200, 0, 1)
     local briBlock = parameterBlock(
+        "brightness",
         "Brilho",
         "Offset na curva GAMMA_LUT do hardware (-100..100%)",
         localDevice.brightness,
-        -100, 100,
-        briProgress,
-        "onBrightnessSub10",
+        -100, 100, 0,
+        function(val) localDevice.brightness = clamp(val, -100, 100) end,
         "onBrightnessSub1",
         "onBrightnessAdd1",
-        "onBrightnessAdd10",
-        "onBrightnessReset",
-        0
+        "onBrightnessReset"
     )
 
     -- 3. Presets Rápidos
@@ -539,12 +565,6 @@ function onToggleMaster()
     render()
 end
 
-function onSaturationSub10()
-    localDevice.saturation = clamp(localDevice.saturation - 10, 0, 400)
-    sendColorUpdate(true)
-    render()
-end
-
 function onSaturationSub1()
     localDevice.saturation = clamp(localDevice.saturation - 1, 0, 400)
     sendColorUpdate(true)
@@ -557,20 +577,8 @@ function onSaturationAdd1()
     render()
 end
 
-function onSaturationAdd10()
-    localDevice.saturation = clamp(localDevice.saturation + 10, 0, 400)
-    sendColorUpdate(true)
-    render()
-end
-
 function onSaturationReset()
     localDevice.saturation = 100
-    sendColorUpdate(true)
-    render()
-end
-
-function onContrastSub10()
-    localDevice.contrast = clamp(localDevice.contrast - 10, 10, 300)
     sendColorUpdate(true)
     render()
 end
@@ -587,20 +595,8 @@ function onContrastAdd1()
     render()
 end
 
-function onContrastAdd10()
-    localDevice.contrast = clamp(localDevice.contrast + 10, 10, 300)
-    sendColorUpdate(true)
-    render()
-end
-
 function onContrastReset()
     localDevice.contrast = 100
-    sendColorUpdate(true)
-    render()
-end
-
-function onBrightnessSub10()
-    localDevice.brightness = clamp(localDevice.brightness - 10, -100, 100)
     sendColorUpdate(true)
     render()
 end
@@ -613,12 +609,6 @@ end
 
 function onBrightnessAdd1()
     localDevice.brightness = clamp(localDevice.brightness + 1, -100, 100)
-    sendColorUpdate(true)
-    render()
-end
-
-function onBrightnessAdd10()
-    localDevice.brightness = clamp(localDevice.brightness + 10, -100, 100)
     sendColorUpdate(true)
     render()
 end
