@@ -1,0 +1,2 @@
+# Native devtmpfs rule for /dev/chroma_amd
+KERNEL=="chroma_amd", SUBSYSTEM=="misc", GROUP="video", MODE="0660"

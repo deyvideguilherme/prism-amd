@@ -2,6 +2,7 @@ obj-m += chroma_amd.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
+UDEV_DIR ?= /etc/udev/rules.d
 
 # Detecta automaticamente se o kernel foi compilado com Clang/LLVM (padrão no CachyOS)
 CLANG_BUILT := $(shell grep -s "CONFIG_CC_IS_CLANG=y" $(KDIR)/.config)
@@ -23,4 +24,12 @@ load:
 unload:
 	sudo rmmod chroma_amd
 
-.PHONY: all clean load unload
+install-udev:
+	sudo install -Dm644 99-chroma-amd.rules $(UDEV_DIR)/99-chroma-amd.rules
+	sudo udevadm control --reload-rules
+
+uninstall-udev:
+	sudo rm -f $(UDEV_DIR)/99-chroma-amd.rules
+	sudo udevadm control --reload-rules
+
+.PHONY: all clean load unload install-udev uninstall-udev
