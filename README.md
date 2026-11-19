@@ -32,30 +32,34 @@ Para verificar se o módulo e o kprobe foram inicializados com sucesso:
 sudo dmesg | grep chroma_amd
 ```
 
-### Controle em tempo real (sysfs)
+### Controle em tempo real (/dev/chroma_amd)
 
-Os parâmetros podem ser alterados instantaneamente sem reiniciar a sessão gráfica:
+Os parâmetros podem ser alterados instantaneamente via `/dev/chroma_amd` (usuários no grupo `video` não necessitam de `sudo`):
 
 ```bash
 # Saturação (Digital Vibrance): 100 = padrão, 160 = +60%, 200 = 2x, 0 = monocromático
-echo 160 | sudo tee /sys/kernel/chroma_amd/saturation
+echo "saturation=160" > /dev/chroma_amd
 
 # Contraste: 100 = padrão, 115 = +15%
-echo 115 | sudo tee /sys/kernel/chroma_amd/contrast
+echo "contrast=115" > /dev/chroma_amd
 
 # Brilho: 0 = padrão
-echo 0 | sudo tee /sys/kernel/chroma_amd/brightness
+echo "brightness=0" > /dev/chroma_amd
+
+# Múltiplos parâmetros simultâneos
+echo "saturation=150 contrast=110 brightness=5" > /dev/chroma_amd
 
 # Ativar ou desativar a injeção em hardware
-echo 0 | sudo tee /sys/kernel/chroma_amd/enabled
-echo 1 | sudo tee /sys/kernel/chroma_amd/enabled
+echo "enabled=0" > /dev/chroma_amd
+echo "enabled=1" > /dev/chroma_amd
 ```
 
-Para permitir escrita sem necessidade de `sudo`:
+Para inspecionar o estado atual:
 
 ```bash
-sudo chmod 0666 /sys/kernel/chroma_amd/*
-echo 160 > /sys/kernel/chroma_amd/saturation
+cat /dev/chroma_amd
+# ou via sysfs (somente leitura):
+cat /sys/kernel/chroma_amd/saturation
 ```
 
 ### Descarga

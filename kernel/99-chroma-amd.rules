@@ -1,2 +1,2 @@
-ACTION=="add", SUBSYSTEM=="module", KERNEL=="chroma_amd", RUN+="/bin/sh -c 'sleep 0.1; chgrp -R video /sys/kernel/chroma_amd && chmod 0775 /sys/kernel/chroma_amd && chmod 0664 /sys/kernel/chroma_amd/*'"
-ACTION=="add", DEVPATH=="/kernel/chroma_amd", RUN+="/bin/sh -c 'chgrp -R video /sys/kernel/chroma_amd && chmod 0775 /sys/kernel/chroma_amd && chmod 0664 /sys/kernel/chroma_amd/*'"
+# Native devtmpfs rule for /dev/chroma_amd
+KERNEL=="chroma_amd", SUBSYSTEM=="misc", GROUP="video", MODE="0660"

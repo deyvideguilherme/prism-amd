@@ -4,6 +4,9 @@
  *
  * Injects Rec.709 Color Transformation Matrices (CTM) and GAMMA_LUT tables directly into
  * the AMD Display Core Next (DCN) hardware pipeline by intercepting DRM atomic commits via kprobe.
+ *
+ * Device node: /dev/chroma_amd (character miscdevice, mode 0660, group video)
+ * Telemetry:   /sys/kernel/chroma_amd/ (read-only mode 0444)
  */
 
 #include <linux/module.h>
@@ -11,6 +14,9 @@
 #include <linux/init.h>
 #include <linux/kobject.h>
 #include <linux/sysfs.h>
+#include <linux/fs.h>
+#include <linux/miscdevice.h>
+#include <linux/uaccess.h>
 #include <linux/string.h>
 #include <linux/atomic.h>
 #include <linux/spinlock.h>
@@ -30,7 +36,7 @@
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("prism-amd Contributors");
 MODULE_DESCRIPTION("Hardware CTM and GAMMA_LUT Interceptor for AMDGPU DRM/KMS");
-MODULE_VERSION("1.1.0");
+MODULE_VERSION("1.2.0");
 
 /*
  * Kernel compatibility:
@@ -50,7 +56,7 @@ MODULE_VERSION("1.1.0");
 #define MAX_CRTCS 32
 #define MAX_GAMMA_LUT_SIZE 4096
 
-/* Sysfs tuning parameters (/sys/kernel/chroma_amd/) */
+/* State tuning parameters */
 static int g_saturation = 100; // 0 to 400 (default 100 = 100%)
 static int g_contrast = 100;   // 10 to 300 (default 100 = 100%)
 static int g_brightness = 0;   // -100 to 100 (default 0 = 0%)
@@ -152,97 +158,126 @@ static void chroma_generate_gamma_lut(struct drm_color_lut *lut, u32 size, int b
 }
 
 /*
- * Sysfs Callbacks (/sys/kernel/chroma_amd/)
+ * /dev/chroma_amd File Operations (miscdevice)
+ */
+static ssize_t chroma_dev_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
+{
+	char msg[128];
+	int len;
+
+	len = scnprintf(msg, sizeof(msg),
+			"enabled=%d\n"
+			"saturation=%d\n"
+			"contrast=%d\n"
+			"brightness=%d\n",
+			g_enabled, g_saturation, g_contrast, g_brightness);
+
+	return simple_read_from_buffer(buf, count, ppos, msg, len);
+}
+
+static ssize_t chroma_dev_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+{
+	char kbuf[256];
+	char *p, *line, *key, *val_str;
+	int val;
+	bool changed = false;
+
+	if (count == 0)
+		return 0;
+	if (count >= sizeof(kbuf))
+		return -EINVAL;
+
+	if (copy_from_user(kbuf, buf, count))
+		return -EFAULT;
+
+	kbuf[count] = '\0';
+	p = kbuf;
+
+	while ((line = strsep(&p, " \t\r\n")) != NULL) {
+		if (*line == '\0')
+			continue;
+
+		key = strsep(&line, "=");
+		val_str = line;
+		if (!key || !val_str || *val_str == '\0')
+			return -EINVAL;
+
+		if (kstrtoint(val_str, 10, &val) < 0)
+			return -EINVAL;
+
+		if (strcmp(key, "saturation") == 0) {
+			if (val < 0 || val > 400)
+				return -EINVAL;
+			g_saturation = val;
+			changed = true;
+		} else if (strcmp(key, "contrast") == 0) {
+			if (val < 10 || val > 300)
+				return -EINVAL;
+			g_contrast = val;
+			changed = true;
+		} else if (strcmp(key, "brightness") == 0) {
+			if (val < -100 || val > 100)
+				return -EINVAL;
+			g_brightness = val;
+			changed = true;
+		} else if (strcmp(key, "enabled") == 0) {
+			if (val != 0 && val != 1)
+				return -EINVAL;
+			g_enabled = val;
+			changed = true;
+		} else {
+			return -EINVAL;
+		}
+	}
+
+	if (changed) {
+		chroma_recalc_ctm();
+		atomic_inc(&config_generation);
+	}
+
+	return count;
+}
+
+static const struct file_operations chroma_fops = {
+	.owner = THIS_MODULE,
+	.read = chroma_dev_read,
+	.write = chroma_dev_write,
+	.llseek = default_llseek,
+};
+
+static struct miscdevice chroma_misc_dev = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name = "chroma_amd",
+	.fops = &chroma_fops,
+	.mode = 0660,
+};
+
+/*
+ * Sysfs Read-Only Telemetry (/sys/kernel/chroma_amd/)
  */
 static ssize_t saturation_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
 	return sysfs_emit(buf, "%d\n", g_saturation);
 }
-
-static ssize_t saturation_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
-{
-	int val;
-
-	if (kstrtoint(buf, 10, &val) < 0)
-		return -EINVAL;
-	if (val < 0 || val > 400)
-		return -EINVAL;
-
-	g_saturation = val;
-	chroma_recalc_ctm();
-	atomic_inc(&config_generation);
-
-	return count;
-}
-
-static struct kobj_attribute saturation_attr = __ATTR(saturation, 0664, saturation_show, saturation_store);
+static struct kobj_attribute saturation_attr = __ATTR_RO(saturation);
 
 static ssize_t contrast_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
 	return sysfs_emit(buf, "%d\n", g_contrast);
 }
-
-static ssize_t contrast_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
-{
-	int val;
-
-	if (kstrtoint(buf, 10, &val) < 0)
-		return -EINVAL;
-	if (val < 10 || val > 300)
-		return -EINVAL;
-
-	g_contrast = val;
-	chroma_recalc_ctm();
-	atomic_inc(&config_generation);
-
-	return count;
-}
-
-static struct kobj_attribute contrast_attr = __ATTR(contrast, 0664, contrast_show, contrast_store);
+static struct kobj_attribute contrast_attr = __ATTR_RO(contrast);
 
 static ssize_t brightness_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
 	return sysfs_emit(buf, "%d\n", g_brightness);
 }
-
-static ssize_t brightness_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
-{
-	int val;
-
-	if (kstrtoint(buf, 10, &val) < 0)
-		return -EINVAL;
-	if (val < -100 || val > 100)
-		return -EINVAL;
-
-	g_brightness = val;
-	atomic_inc(&config_generation);
-
-	return count;
-}
-
-static struct kobj_attribute brightness_attr = __ATTR(brightness, 0664, brightness_show, brightness_store);
+static struct kobj_attribute brightness_attr = __ATTR_RO(brightness);
 
 static ssize_t enabled_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
 	return sysfs_emit(buf, "%d\n", g_enabled);
 }
-
-static ssize_t enabled_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
-{
-	int val;
-
-	if (kstrtoint(buf, 10, &val) < 0)
-		return -EINVAL;
-	if (val != 0 && val != 1)
-		return -EINVAL;
-
-	g_enabled = val;
-	atomic_inc(&config_generation);
-
-	return count;
-}
-
-static struct kobj_attribute enabled_attr = __ATTR(enabled, 0664, enabled_show, enabled_store);
+static struct kobj_attribute enabled_attr = __ATTR_RO(enabled);
 
 static struct attribute *chroma_attrs[] = {
 	&saturation_attr.attr,
@@ -392,10 +427,18 @@ static int __init chroma_init(void)
 	/* Pre-calculate initial CTM (100% saturation, 100% contrast) */
 	chroma_recalc_ctm();
 
-	/* Create sysfs interface /sys/kernel/chroma_amd/ */
+	/* Register misc character device /dev/chroma_amd */
+	ret = misc_register(&chroma_misc_dev);
+	if (ret) {
+		pr_err("chroma_amd: Failed to register misc device /dev/chroma_amd: %d\n", ret);
+		return ret;
+	}
+
+	/* Create read-only sysfs telemetry interface /sys/kernel/chroma_amd/ */
 	chroma_kobj = kobject_create_and_add("chroma_amd", kernel_kobj);
 	if (!chroma_kobj) {
 		pr_err("chroma_amd: Failed to create kobject in kernel_kobj\n");
+		misc_deregister(&chroma_misc_dev);
 		return -ENOMEM;
 	}
 
@@ -403,11 +446,9 @@ static int __init chroma_init(void)
 	if (ret) {
 		pr_err("chroma_amd: Failed to create sysfs attribute group: %d\n", ret);
 		kobject_put(chroma_kobj);
+		misc_deregister(&chroma_misc_dev);
 		return ret;
 	}
-
-	/* Notify udev that sysfs attributes are ready */
-	kobject_uevent(chroma_kobj, KOBJ_ADD);
 
 	/* Register kprobe on drm_atomic_helper_commit */
 	ret = register_kprobe(&chroma_kp);
@@ -415,12 +456,13 @@ static int __init chroma_init(void)
 		pr_err("chroma_amd: Failed to register kprobe on drm_atomic_helper_commit: %d\n", ret);
 		sysfs_remove_group(chroma_kobj, &chroma_attr_group);
 		kobject_put(chroma_kobj);
+		misc_deregister(&chroma_misc_dev);
 		return ret;
 	}
 
 	pr_info("chroma_amd: Kprobe registered successfully on %s (addr: %p)\n",
 		chroma_kp.symbol_name, chroma_kp.addr);
-	pr_info("chroma_amd: Interface /sys/kernel/chroma_amd/ ready for real-time control!\n");
+	pr_info("chroma_amd: /dev/chroma_amd ready for zero-overhead hardware control!\n");
 
 	return 0;
 }
@@ -435,6 +477,8 @@ static void __exit chroma_exit(void)
 		sysfs_remove_group(chroma_kobj, &chroma_attr_group);
 		kobject_put(chroma_kobj);
 	}
+
+	misc_deregister(&chroma_misc_dev);
 
 	pr_info("chroma_amd: Module unloaded successfully.\n");
 }

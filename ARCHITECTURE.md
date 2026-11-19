@@ -36,7 +36,7 @@ Para atingir todo o desktop sem custo computacional, foi desenvolvido um interce
 A solução definitiva foi mover o ponto de controle para o espaço de kernel (`kernel/chroma_amd.c`):
 - Um módulo dinâmico anexa um kprobe ao símbolo `drm_atomic_helper_commit`.
 - Como essa função é o ponto central onde todo commit atômico do subsistema DRM converge — independentemente de ter sido disparado por `libdrm.so`, `rustix`, X11 ou qualquer chamada direta de syscall —, a injeção torna-se 100% universal.
-- Os parâmetros são expostos em `/sys/kernel/chroma_amd/` via interface sysfs com permissões configuráveis.
+- O controle é realizado via dispositivo de caractere `/dev/chroma_amd` (`miscdevice`, grupo `video`, modo `0660`), com `/sys/kernel/chroma_amd/` exposto como telemetria em modo somente leitura (`0444`).
 
 ## 3. Matemática CTM e Formato S31.32 no Kernel
 
