@@ -155,10 +155,12 @@ add_executable(test_cli
     src/cli/device.cpp
     src/cli/telemetry.cpp
     src/cli/profiles.cpp
+    src/cli/doctor.cpp
 )
 
 target_include_directories(test_cli PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/kernel"
 )
 
 enable_testing()
@@ -173,10 +175,12 @@ add_executable(prisma-ctl
     src/cli/device.cpp
     src/cli/telemetry.cpp
     src/cli/profiles.cpp
+    src/cli/doctor.cpp
 )
 
 target_include_directories(prisma-ctl PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/kernel"
 )
 
 # ==============================================================================

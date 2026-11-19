@@ -6,6 +6,8 @@
 #include <cerrno>
 #include <sstream>
 #include <charconv>
+#include <sys/stat.h>
+#include <sys/ioctl.h>
 
 namespace prisma {
 
@@ -67,7 +69,9 @@ DeviceState parse_state_buffer(std::string_view buffer) {
             continue;
         }
 
-        if (key == "saturation") {
+        if (key == "abi_version") {
+            state.abi_version = val;
+        } else if (key == "saturation") {
             state.saturation = val;
         } else if (key == "contrast") {
             state.contrast = val;
@@ -136,10 +140,55 @@ static void handle_posix_error(const std::string& dev_path, int err) {
     throw DeviceError("I/O error accessing '" + dev_path + "': " + std::strerror(err));
 }
 
+void check_device_abi(int fd, const std::string& dev_path) {
+    struct stat st{};
+    if (::fstat(fd, &st) != 0 || !S_ISCHR(st.st_mode)) {
+        return; // Skip ioctl validation on regular mock files in tests
+    }
+
+    uint32_t kabi = 0;
+    int ret = ::ioctl(fd, PRISMA_IOC_GET_ABI, &kabi);
+    if (ret < 0) {
+        throw DeviceError(
+            "Prisma ABI mismatch: kernel module does not support ABI v" +
+            std::to_string(PRISMA_ABI_VERSION) + " (outdated module loaded).\n"
+            "Please reload the kernel module:\n"
+            "  sudo rmmod chroma_amd && sudo modprobe chroma_amd  (or sudo make -C kernel reload)"
+        );
+    }
+
+    if (kabi != PRISMA_ABI_VERSION) {
+        throw DeviceError(
+            "Prisma ABI version mismatch: kernel module is ABI v" +
+            std::to_string(kabi) + ", but userspace expects ABI v" +
+            std::to_string(PRISMA_ABI_VERSION) + ".\n"
+            "Please reload the kernel module:\n"
+            "  sudo rmmod chroma_amd && sudo modprobe chroma_amd  (or sudo make -C kernel reload)"
+        );
+    }
+}
+
 DeviceState read_device_state(const std::string& dev_path) {
     int fd = ::open(dev_path.c_str(), O_RDONLY);
     if (fd < 0) {
         handle_posix_error(dev_path, errno);
+    }
+
+    struct stat st{};
+    if (::fstat(fd, &st) == 0 && S_ISCHR(st.st_mode)) {
+        check_device_abi(fd, dev_path);
+
+        struct prisma_ioctl_state ist{};
+        if (::ioctl(fd, PRISMA_IOC_GET_STATE, &ist) == 0) {
+            ::close(fd);
+            DeviceState state;
+            state.abi_version = static_cast<int>(ist.abi_version);
+            state.enabled = ist.enabled;
+            state.saturation = ist.saturation;
+            state.contrast = ist.contrast;
+            state.brightness = ist.brightness;
+            return state;
+        }
     }
 
     char buf[512];
@@ -171,6 +220,11 @@ void write_device_params(
     int fd = ::open(dev_path.c_str(), O_WRONLY);
     if (fd < 0) {
         handle_posix_error(dev_path, errno);
+    }
+
+    struct stat st{};
+    if (::fstat(fd, &st) == 0 && S_ISCHR(st.st_mode)) {
+        check_device_abi(fd, dev_path);
     }
 
     ssize_t bytes_written = ::write(fd, cmd.c_str(), cmd.size());

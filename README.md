@@ -131,10 +131,10 @@ echo "chroma_amd" | sudo tee /etc/modules-load.d/chroma_amd.conf
 Para registrar o módulo manualmente no DKMS:
 
 ```bash
-sudo cp -r kernel /usr/src/chroma-amd-0.1.0
-sudo dkms add -m chroma-amd -v 0.1.0
-sudo dkms build -m chroma-amd -v 0.1.0
-sudo dkms install -m chroma-amd -v 0.1.0
+sudo cp -r kernel /usr/src/chroma-amd-1.0.0
+sudo dkms add -m chroma-amd -v 1.0.0
+sudo dkms build -m chroma-amd -v 1.0.0
+sudo dkms install -m chroma-amd -v 1.0.0
 ```
 
 ## 5. Instalação Manual no Noctalia Shell
@@ -226,7 +226,78 @@ prisma-ctl profile delete jogos
 prisma-ctl profile reset
 ```
 
-## 7. Controle Direto via Shell
+### Autodiagnóstico do Sistema (prisma-ctl doctor)
+
+O subcomando `doctor` executa uma bateria completa de verificações para identificar inconsistências no kernel, no módulo, no nó de dispositivo e na GPU:
+
+```bash
+prisma-ctl doctor
+```
+
+Exemplo de saída:
+
+```text
+Prisma Control Center - System Self-Diagnostic (doctor)
+======================================================
+
+[OK] Linux kernel: 7.3.4-1-cachyos (x86_64)
+[OK] Kernel module: chroma_amd is loaded (version 1.0.0)
+[OK] Device node: /dev/chroma_amd (group: video, read/write access granted)
+[OK] Protocol ABI: v1 (kernel module and CLI userspace are synchronized)
+[OK] AMD GPU detected: card1 (driver: amdgpu, PCI: 0000:2d:00.0)
+     - Display output: DP-2 (connected, 2560x1440)
+     - Hardware telemetry:
+       * Edge temperature:     40.0 °C
+       * Hotspot temperature:  42.0 °C
+       * Graphics clock (SCLK): 1800 MHz
+       * GPU load:              4 %
+       * VRAM usage:            1974 / 16304 MiB (12.1 %)
+       * Board power:           20.0 W
+
+------------------------------------------------------
+Diagnosis: All checks passed. System is fully operational.
+```
+
+O comando retorna código de saída `0` quando todos os componentes estão saudáveis e `1` caso seja detectada qualquer falha crítica (módulo não carregado, ausência de permissões no grupo `video`, descompasso de ABI ou ausência de GPU AMD).
+
+### Versão e ABI
+
+```bash
+prisma-ctl --version
+# Exemplo de saída: prisma-ctl 1.0.0 (ABI v1)
+```
+
+## 7. Compatibilidade de Espaço de Cor: Modo SDR vs HDR / ICC
+
+A calibragem de cores do Prisma Control Center atua diretamente na matriz linear 3x3 de transformação de cor (CTM) no bloco de hardware do display controller AMD (DCN). Essa abordagem foi concebida especificamente para espaços de cor de faixa dinâmica padrão (SDR - Rec.709 / sRGB).
+
+### Interação com Compositor e HDR
+
+- **Operação em SDR (Recomendada):** Em desktops Wayland como o Niri ou compositores baseados em wlroots, as cores das janelas SDR são mapeadas linearmente através da CTM. A calibragem de saturação, contraste e brilho opera diretamente na saída de vídeo sem distorção da curva sRGB nativa.
+- **Interferência com HDR e Perfis ICC:** Recursos avançados de composição HDR (como curvas PQ/BT.2086) e calibrações de perfil ICC gerenciadas pelo compositor também concorrem pela matriz CTM ou blocos de LUT 3D do CRTC.
+  - Quando a calibragem do Prisma está ativa (`enabled=1`), a matriz Rec.709 do Prisma assume o controle do pipeline de cor do CRTC para garantir a vivacidade solicitada pelo usuário.
+  - Para fluxos de trabalho que exigem fidelidade estrita de perfil ICC ou exibição de conteúdo nativo HDR pelo compositor, desative a calibragem do Prisma (`prisma-ctl set --enabled 0` ou via chave geral na interface).
+- **Preservação de CTM do Compositor ao Desativar:** Quando `enabled=0`, o módulo de kernel `chroma_amd` limpa a injeção ativa e não intercepta nem sobrescreve matrizes CTM configuradas pelo compositor (como o filtro Night Light/Luz Noturna ou calibrações de ICC).
+
+## 8. Sincronização e Automação de Versões (scripts/bump-version.sh)
+
+Para garantir integridade e consistência de versão entre todos os subsistemas (módulo de kernel, cabeçalho de ABI, utilitário CLI, empacotamento Arch/DKMS e manifesto do plugin Noctalia), o repositório disponibiliza o utilitário `scripts/bump-version.sh`:
+
+```bash
+./scripts/bump-version.sh 1.0.0
+```
+
+O script executa as seguintes etapas de forma atômica:
+1. Valida o formato semântico (`X.Y.Z`).
+2. Atualiza `CMakeLists.txt` (`project(prisma VERSION ...)`).
+3. Atualiza `kernel/dkms.conf` (`PACKAGE_VERSION=...`).
+4. Atualiza a macro de versão no cabeçalho de ABI `kernel/prisma_abi.h` (`PRISMA_VERSION`).
+5. Atualiza `packaging/arch/PKGBUILD` (`pkgver=...` e redefine `pkgrel=1`).
+6. Atualiza o manifesto do plugin Noctalia Shell `ui/prisma/plugin.toml` (`version = "..."`).
+7. Regenera `packaging/arch/.SRCINFO` executando `makepkg --printsrcinfo`.
+8. Realiza validação cruzada rigorosa, assegurando que nenhum arquivo permaneça com versão divergente.
+
+## 9. Controle Direto via Shell
 
 É possível inspecionar e alterar o estado do hardware sem utilizar a CLI:
 
@@ -238,12 +309,13 @@ echo "saturation=160 contrast=115 brightness=10" > /dev/chroma_amd
 cat /dev/chroma_amd
 
 # Leitura individual de telemetria via sysfs (somente leitura)
+cat /sys/kernel/chroma_amd/abi_version
 cat /sys/kernel/chroma_amd/saturation
 cat /sys/kernel/chroma_amd/contrast
 cat /sys/kernel/chroma_amd/brightness
 cat /sys/kernel/chroma_amd/enabled
 ```
 
-## 8. Licença
+## 10. Licença
 
 Código em userspace sob licença MIT. Módulo de kernel sob licença Dual MIT / GPL v2.
