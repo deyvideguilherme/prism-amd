@@ -1,46 +1,83 @@
-# prisma
+# Prisma Control Center
 
-Controle de cor em hardware (saturação, contraste e brilho) para GPUs AMD (`amdgpu`) no Linux, atuando no desktop inteiro (Wayland/X11) e em todos os jogos simultaneamente com custo zero de performance.
+Calibragem de cor em hardware e monitoramento de sensores para placas de vídeo AMD no Noctalia Shell (Niri / Wayland).
 
-O projeto também é referenciado internamente como `prism-amd`.
+## 1. Visão Geral e Arquitetura
 
-## Visão Geral
+O Prisma Control Center (`chroma-layer`) é uma solução integrada para ajuste de exibição em hardware e telemetria de GPUs AMD (`amdgpu`) no Linux. Em vez de utilizar shaders ou pós-processamento na composição gráfica, o projeto atua diretamente na saída de vídeo do Display Core Next (DCN) via DRM/KMS, aplicando saturação, contraste e ganho de brilho na matriz linear 3x3 com custo computacional nulo para a CPU e GPU.
 
-O controle tradicional de vibrance via shaders consome recursos de computação da GPU e introduz latência de quadro. O `prisma` atua no nível mais baixo do subsistema DRM/KMS: ele intercepta as requisições atômicas de exibição e programa os blocos de hardware Display Core Next (DCN) da GPU AMD durante o escaneamento do sinal (scanout).
+A suíte é composta por três componentes:
 
-O sistema é composto por duas partes principais:
-1. **Módulo de Kernel Linux (`kernel/chroma_amd.ko`):** Intercepta `drm_atomic_helper_commit` via `kprobe`, injeta a matriz `CTM` Rec.709 (ponto fixo S31.32) e a tabela `GAMMA_LUT` (até 4096 entradas) calculadas inteiramente em inteiros de 64 bits sem FPU. Expõe o dispositivo de caractere `/dev/chroma_amd` (`miscdevice`) e nós de telemetria em `/sys/kernel/chroma_amd/` (`0444`).
-2. **Utilitário CLI (`prisma-ctl`):** Ferramenta em C++20 para inspeção de estado, telemetria em tempo real de sensores do driver `amdgpu` / `hwmon` e gerenciamento de perfis persistentes.
+- **Módulo de Kernel (`kernel/chroma_amd.ko`):** Módulo dinâmico que intercepta requisições atômicas KMS (`drm_atomic_helper_commit`) via kprobe. Injeta a matriz CTM Rec.709 3x3 calculada em aritmética inteira de 64 bits (formato S31.32), integrando saturação, contraste e brilho linear. Mantém a curva de transferência sRGB nativa de hardware do display controller inalterada, evitando distorções de gama e lavagem de tons escuros. Expõe o dispositivo de caractere `/dev/chroma_amd` (`miscdevice`) e nós de telemetria em `/sys/kernel/chroma_amd/`.
+- **Utilitário CLI (`prisma-ctl`):** Utilitário de linha de comando em C++20 para consulta de telemetria do driver `amdgpu` e `hwmon`, ajuste atômico de parâmetros em `/dev/chroma_amd` e gerenciamento de perfis em `~/.config/prisma/profiles/`.
+- **Plugin Noctalia Shell (`ui/prisma`):** Plugin nativo para o ambiente Noctalia Shell no compositor Niri (Wayland). Oferece um widget de barra com monitoramento em tempo real e uma central de controle visual com abas de **Desempenho**, **Tela & Cor** e **Perfis**.
 
-Para aprofundamento na arquitetura interna, inventário de arquivos e especificação do contrato JSON, consulte o documento [ARCHITECTURE.md](ARCHITECTURE.md).
+## 2. Requisitos de Sistema
 
-## Requisitos de Sistema (Arch Linux / CachyOS)
+- **Distribuição:** Arch Linux, CachyOS ou distribuições baseadas em Linux com suporte a DRM/KMS e GPUs AMD (RDNA / GCN).
+- **Pacotes do sistema:**
+  - Headers do kernel Linux ativo (`linux-headers` ou `linux-cachyos-headers`)
+  - Compilador C/C++ (`clang` com suporte a `LLVM=1` para CachyOS, ou `gcc`)
+  - `cmake` (>= 3.20) e `make`
+  - Ferramentas de desenvolvimento base (`base-devel`, `libdrm`)
+  - Noctalia Shell (para execução do painel gráfico)
 
-```bash
-sudo pacman -S --needed base-devel linux-cachyos-headers clang lld cmake libdrm vulkan-headers vulkan-icd-loader shaderc
-```
+## 3. Compilação e Instalação
 
-Em kernels padrão Arch Linux (`linux`), substitua `linux-cachyos-headers` por `linux-headers`.
-
-## Módulo de Kernel
-
-### 1. Compilação e carga
+### Compilação do Módulo de Kernel
 
 ```bash
 cd kernel
 make
+```
+
+*Nota: Em sistemas CachyOS compilados com Clang/LLVM, o Makefile detecta automaticamente `CONFIG_CC_IS_CLANG=y` e ativa `LLVM=1`.*
+
+### Compilação da CLI
+
+A partir da raiz do repositório:
+
+```bash
+cmake -B build
+cmake --build build
+cmake --build build --target install-local
+```
+
+O binário `prisma-ctl` é instalado em `~/.local/bin/prisma-ctl`. Certifique-se de que `~/.local/bin` está presente no seu `$PATH`.
+
+Para permitir que o serviço do Noctalia Shell valide e execute a CLI em qualquer contexto, crie o link simbólico global:
+
+```bash
+sudo ln -sf ~/.local/bin/prisma-ctl /usr/local/bin/prisma-ctl
+```
+
+## 4. Configuração do Módulo e Permissões
+
+### Carregamento Temporário
+
+Para testar o módulo na sessão atual:
+
+```bash
+cd kernel
 sudo make load
 ```
 
-Para verificar se o módulo e o kprobe foram registrados com sucesso no kernel:
+Para verificar o registro no log do kernel:
 
 ```bash
 sudo dmesg | grep chroma_amd
 ```
 
-### 2. Permissões de acesso (udev)
+Para descarregar:
 
-Para permitir leitura e escrita sem privilégios de root (`sudo`), instale a regra udev nativa e garanta que o seu usuário pertença ao grupo `video`:
+```bash
+cd kernel
+sudo make unload
+```
+
+### Acesso sem Root (Regra udev)
+
+Por padrão, `/dev/chroma_amd` é criado com permissões `0660` para o grupo `video`. Instale a regra udev e adicione o seu usuário ao grupo:
 
 ```bash
 cd kernel
@@ -48,18 +85,26 @@ sudo make install-udev
 sudo usermod -aG video $USER
 ```
 
-*Nota: Caso o usuário tenha sido adicionado ao grupo `video` nesta etapa, encerre e reinicie a sessão de login para atualizar as permissões do shell.*
+*Nota: Reinicie a sessão de login para que a alteração de grupo tenha efeito no shell do usuário.*
 
-### 3. Descarga do módulo
+### Carga Automática no Boot
 
+Para carregar o módulo automaticamente a cada inicialização do sistema:
+
+1. Copie o binário do módulo compilado para a árvore de módulos extras do kernel:
 ```bash
-cd kernel
-sudo make unload
+sudo install -Dm644 kernel/chroma_amd.ko /lib/modules/$(uname -r)/extra/chroma_amd.ko
+sudo depmod -a
 ```
 
-### 4. Suporte a DKMS
+2. Registre o módulo na inicialização:
+```bash
+echo "chroma_amd" | sudo tee /etc/modules-load.d/chroma_amd.conf
+```
 
-O diretório `kernel/` contém `dkms.conf` para recompilação automática a cada atualização do kernel Linux:
+#### Suporte a DKMS (Opcional)
+
+Para reconstrução automática em atualizações de kernel:
 
 ```bash
 sudo cp -r kernel /usr/src/prism-amd-0.1.0
@@ -68,194 +113,113 @@ sudo dkms build -m prism-amd -v 0.1.0
 sudo dkms install -m prism-amd -v 0.1.0
 ```
 
-## Utilitário CLI (prisma-ctl)
+## 5. Instalação no Noctalia Shell
 
-O utilitário `prisma-ctl` centraliza a leitura e escrita no dispositivo de hardware, além de coletar métricas da GPU e persistir perfis.
+O plugin gráfico pode ser instalado via CMake ou registrado como fonte local de desenvolvimento:
 
-### Compilação e instalação local
+### Opção A: Instalação Materializada via CMake (Recomendada)
 
 ```bash
-cmake -B build
-cmake --build build
-cmake --build build --target install-local
+cmake --build build --target install-ui
+noctalia msg plugins update deyvideguilherme
+noctalia msg plugins enable deyvideguilherme/prisma
 ```
 
-O comando copia o executável para `~/.local/bin/prisma-ctl`. Certifique-se de que o diretório `~/.local/bin` consta na sua variável de ambiente `$PATH`.
+O plugin é instalado em `~/.local/state/noctalia/plugins/materialized/deyvideguilherme/prisma`.
 
-Para desinstalar:
+### Opção B: Fonte Local para Desenvolvimento
 
 ```bash
-cmake --build build --target uninstall-local
+noctalia msg plugins source add deyvideguilherme path $(pwd)/ui
+noctalia msg plugins update deyvideguilherme
+noctalia msg plugins enable deyvideguilherme/prisma
 ```
 
-### Comandos da CLI
-
-#### 1. Inspeção de estado e telemetria
+### Verificação do Status do Plugin
 
 ```bash
-# Exibe estado atual do hardware e métricas da GPU
+noctalia msg plugins list | grep prisma
+```
+
+## 6. Referência da CLI (prisma-ctl)
+
+O utilitário `prisma-ctl` gerencia parâmetros de hardware, consulta de sensores e persistência de perfis.
+
+### Inspeção de Estado e Sensores
+
+```bash
+# Exibe estado atual da calibragem e sensores de telemetria
 prisma-ctl status
 
-# Exibe o estado em formato JSON estruturado (contrato oficial)
+# Saída em formato JSON estruturado
 prisma-ctl status --json
 
-# Exibe apenas os sensores de telemetria da GPU
+# Exibe exclusivamente os sensores de hardware (carga, clock, temperaturas, potência, VRAM)
 prisma-ctl telemetry
 prisma-ctl telemetry --json
 ```
 
-#### 2. Ajuste de parâmetros de cor
+### Ajuste de Parâmetros de Cor
 
 ```bash
-# Ajustar saturação e contraste
-prisma-ctl set --saturation 160 --contrast 115
+# Ajustar saturação, contraste e brilho
+prisma-ctl set --saturation 160 --contrast 115 --brightness 10
 
 # Usando flags curtas
-prisma-ctl set -s 180 -c 110 -b 10
+prisma-ctl set -s 140 -c 110 -b 5
 
-# Desativar ou reativar a injeção em hardware
+# Desativar temporariamente a calibragem sem descarregar o driver
 prisma-ctl set --enabled 0
+
+# Reativar a calibragem
 prisma-ctl set --enabled 1
 ```
 
-Faixas de valores válidos:
-- `saturation`: `0` a `400` (padrão `100`; `0` = escala de cinza, `100` = normal, `200` = dobro de saturação)
-- `contrast`: `10` a `300` (padrão `100`; `100` = normal, `115` = +15%)
-- `brightness`: `-100` a `100` (padrão `0`; ajuste fino da curva gama via `GAMMA_LUT`)
-- `enabled`: `0` ou `1` (padrão `1`; restaura as curvas e matrizes nativas do compositor quando `0`)
+Faixas de valores suportadas:
+- `saturation` (`-s`): `0` a `400` (padrão `100`; `0` = monocromático, `100` = normal, `200` = saturação dobrada)
+- `contrast` (`-c`): `10` a `300` (padrão `100`; fator linear de contraste)
+- `brightness` (`-b`): `-100` a `100` (padrão `0`; ganho de luminância linear de 0.25x a 1.75x na matriz CTM)
+- `enabled` (`-e`): `0` ou `1` (padrão `1`; restaura bypass quando desativado)
 
-#### 3. Gerenciamento de Perfis
+### Gerenciamento de Perfis
 
-Os perfis são salvos individualmente em `~/.config/prisma/profiles/<nome>.conf`:
+Os perfis são armazenados como arquivos individuais em `~/.config/prisma/profiles/<nome>.conf`:
 
 ```bash
-# Salvar o estado atual sob um nome de perfil
-prisma-ctl profile save cs2
+# Salvar o estado ativo como um perfil
+prisma-ctl profile save jogos
 
 # Aplicar um perfil salvo diretamente ao hardware
-prisma-ctl profile apply cs2
+prisma-ctl profile apply jogos
 
-# Listar todos os perfis existentes
+# Listar perfis salvos
 prisma-ctl profile list
 
-# Deletar um perfil salvo
-prisma-ctl profile delete cs2
+# Excluir um perfil
+prisma-ctl profile delete jogos
 
-# Restaurar parâmetros padrão (sat=100, con=100, bri=0, en=1)
+# Restaurar valores padrão (sat=100, con=100, bri=0, en=1)
 prisma-ctl profile reset
 ```
 
-## Controle Direto via Shell
+## 7. Controle Direto via Shell
 
-É possível interagir diretamente com o driver sem o `prisma-ctl`:
+É possível inspecionar e alterar o estado do hardware sem utilizar a CLI:
 
 ```bash
-# Ajustes pontuais
-echo "saturation=160" > /dev/chroma_amd
-
-# Múltiplos parâmetros na mesma linha
-echo "saturation=150 contrast=115 brightness=5" > /dev/chroma_amd
+# Escrita de parâmetros (atômica, sem root com udev configurado)
+echo "saturation=160 contrast=115 brightness=10" > /dev/chroma_amd
 
 # Leitura do estado ativo
 cat /dev/chroma_amd
 
-# Leitura individual via nós de telemetria sysfs (somente leitura)
+# Leitura individual de telemetria via sysfs (somente leitura)
 cat /sys/kernel/chroma_amd/saturation
 cat /sys/kernel/chroma_amd/contrast
 cat /sys/kernel/chroma_amd/brightness
 cat /sys/kernel/chroma_amd/enabled
 ```
 
-## Plugin Noctalia Shell (Prisma Control Center)
+## 8. Licença
 
-A interface gráfica do Prisma é fornecida como um plugin nativo para o [Noctalia Shell](https://noctalia.dev) (`plugin.toml` e scripts Luau). Ela oferece um widget na barra do sistema com leitura de temperatura/carga e um painel interativo com três abas:
-
-1. **Desempenho:** Cartões de telemetria em tempo real com histórico visual (carga da GPU, clock SCLK, temperatura Hotspot e Edge, consumo elétrico e alocação de VRAM).
-2. **Tela & Cor:** Chave mestre de injeção em hardware, sliders de alta precisão com ajuste fino (-5/+5) e restauração para Saturação (`0..400%`), Contraste (`10..300%`) e Brilho (`-100..100%`), além de presets rápidos (Padrão, Competitivo, Cinema e Monocromático).
-3. **Perfis:** Listagem de perfis salvos em `~/.config/prisma/profiles/`, criação de novos perfis a partir do estado atual, aplicação direta com 1 clique, exclusão e redefinição aos padrões.
-
-### Instalação e Ativação
-
-Existem duas formas suportadas para registrar e ativar o plugin no Noctalia Shell:
-
-#### Opção A: Fonte Local (Recomendado para desenvolvimento)
-
-Adiciona o diretório `ui/` do repositório como fonte local de plugins do Noctalia, permitindo atualizações diretas sem necessidade de reinstalação:
-
-```bash
-# Adicionar a fonte local apontando para o diretório ui/
-noctalia msg plugins source add deyvideguilherme path $(pwd)/ui
-
-# Atualizar o catálogo de fontes e ativar o plugin
-noctalia msg plugins update deyvideguilherme
-noctalia msg plugins enable deyvideguilherme/prisma
-```
-
-#### Opção B: Instalação Materializada via CMake
-
-Copia os arquivos do plugin para o diretório de plugins materializados (`~/.local/state/noctalia/plugins/materialized/deyvideguilherme/prisma`):
-
-```bash
-# Compilar prisma-ctl e instalar localmente
-cmake -B build
-cmake --build build --target install-local
-
-# Instalar o plugin do Noctalia
-cmake --build build --target install-ui
-
-# Ativar na instância ativa do Noctalia
-noctalia msg plugins enable deyvideguilherme/prisma
-```
-
-Caso o Noctalia execute em ambiente com isolamento de binários do usuário, crie um symlink do `prisma-ctl` no caminho de sistema para validação automática de dependências:
-
-```bash
-sudo ln -sf ~/.local/bin/prisma-ctl /usr/local/bin/prisma-ctl
-```
-
-### Verificação e Desinstalação
-
-Para verificar o status do plugin instalado:
-
-```bash
-noctalia msg plugins list | grep prisma
-```
-
-Para desinstalar o plugin materializado:
-
-```bash
-cmake --build build --target uninstall-ui
-```
-
-Ou, caso tenha utilizado a fonte local:
-
-```bash
-noctalia msg plugins disable deyvideguilherme/prisma
-noctalia msg plugins source remove deyvideguilherme
-```
-
-## Vulkan Implicit Layer (Opcional, por aplicação)
-
-Caso deseje aplicar saturação pontual a um único jogo Vulkan sem alterar a exibição de todo o monitor:
-
-```bash
-cmake -B build
-cmake --build build
-cmake --build build --target install-local
-```
-
-Execução:
-
-```bash
-ENABLE_CHROMA_LAYER=1 vkcube
-```
-
-A camada lê `/tmp/chroma.conf` a cada quadro apresentado para ajustes em tempo real via push constants e compute shader.
-
-## Detalhes Arquiteturais e Contrato JSON
-
-Para detalhes sobre a matemática de conversão de ponto fixo S31.32, por que `LD_PRELOAD` falha em compositores baseados em Rust/Smithay, inventário completo de código e especificação do contrato JSON para integração com o Noctalia Shell, leia o [ARCHITECTURE.md](ARCHITECTURE.md).
-
-## Licença
-
-MIT para componentes em userspace e Dual MIT/GPL v2 para o módulo de kernel.
+Código em userspace sob licença MIT. Módulo de kernel sob licença Dual MIT / GPL v2.
