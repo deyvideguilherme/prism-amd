@@ -174,7 +174,26 @@ A interface gráfica do Prisma é fornecida como um plugin nativo para o [Noctal
 2. **Tela & Cor:** Chave mestre de injeção em hardware, sliders de alta precisão com ajuste fino (-5/+5) e restauração para Saturação (`0..400%`), Contraste (`10..300%`) e Brilho (`-100..100%`), além de presets rápidos (Padrão, Competitivo, Cinema e Monocromático).
 3. **Perfis:** Listagem de perfis salvos em `~/.config/prisma/profiles/`, criação de novos perfis a partir do estado atual, aplicação direta com 1 clique, exclusão e redefinição aos padrões.
 
-### Instalação
+### Instalação e Ativação
+
+Existem duas formas suportadas para registrar e ativar o plugin no Noctalia Shell:
+
+#### Opção A: Fonte Local (Recomendado para desenvolvimento)
+
+Adiciona o diretório `ui/` do repositório como fonte local de plugins do Noctalia, permitindo atualizações diretas sem necessidade de reinstalação:
+
+```bash
+# Adicionar a fonte local apontando para o diretório ui/
+noctalia msg plugins source add deyvideguilherme path $(pwd)/ui
+
+# Atualizar o catálogo de fontes e ativar o plugin
+noctalia msg plugins update deyvideguilherme
+noctalia msg plugins enable deyvideguilherme/prisma
+```
+
+#### Opção B: Instalação Materializada via CMake
+
+Copia os arquivos do plugin para o diretório de plugins materializados (`~/.local/state/noctalia/plugins/materialized/deyvideguilherme/prisma`):
 
 ```bash
 # Compilar prisma-ctl e instalar localmente
@@ -183,9 +202,10 @@ cmake --build build --target install-local
 
 # Instalar o plugin do Noctalia
 cmake --build build --target install-ui
-```
 
-O target `install-ui` copia o diretório `ui/prisma-panel/` para `~/.local/state/noctalia/plugins/materialized/deyvideguilherme/prisma`.
+# Ativar na instância ativa do Noctalia
+noctalia msg plugins enable deyvideguilherme/prisma
+```
 
 Caso o Noctalia execute em ambiente com isolamento de binários do usuário, crie um symlink do `prisma-ctl` no caminho de sistema para validação automática de dependências:
 
@@ -193,13 +213,7 @@ Caso o Noctalia execute em ambiente com isolamento de binários do usuário, cri
 sudo ln -sf ~/.local/bin/prisma-ctl /usr/local/bin/prisma-ctl
 ```
 
-### Ativação
-
-Para ativar o plugin na instância em execução do Noctalia Shell:
-
-```bash
-noctalia msg plugins enable deyvideguilherme/prisma
-```
+### Verificação e Desinstalação
 
 Para verificar o status do plugin instalado:
 
@@ -207,10 +221,17 @@ Para verificar o status do plugin instalado:
 noctalia msg plugins list | grep prisma
 ```
 
-Para remover o plugin:
+Para desinstalar o plugin materializado:
 
 ```bash
 cmake --build build --target uninstall-ui
+```
+
+Ou, caso tenha utilizado a fonte local:
+
+```bash
+noctalia msg plugins disable deyvideguilherme/prisma
+noctalia msg plugins source remove deyvideguilherme
 ```
 
 ## Vulkan Implicit Layer (Opcional, por aplicação)

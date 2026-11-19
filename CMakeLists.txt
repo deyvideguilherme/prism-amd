@@ -229,7 +229,7 @@ set(NOCTALIA_PLUGIN_DIR "$ENV{HOME}/.local/state/noctalia/plugins/materialized/d
 # Target: install-ui
 add_custom_target(install-ui
     COMMAND ${CMAKE_COMMAND} -E make_directory "${NOCTALIA_PLUGIN_DIR}"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/ui/prisma-panel" "${NOCTALIA_PLUGIN_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/ui/prisma" "${NOCTALIA_PLUGIN_DIR}"
     COMMENT "Installing Prisma Control Center plugin to ${NOCTALIA_PLUGIN_DIR}"
     VERBATIM
 )
