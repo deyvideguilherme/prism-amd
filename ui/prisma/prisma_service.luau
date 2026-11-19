@@ -26,10 +26,13 @@ local telemetryState = {
     card = "",
     pci_id = "",
     device_id = "",
+    is_apu = false,
     gpu_busy_percent = 0,
     sclk_mhz = 0,
     vram_used_mib = 0,
     vram_total_mib = 0,
+    gtt_used_mib = 0,
+    gtt_total_mib = 0,
     temp_edge_c = 0,
     temp_junction_c = 0,
     power_watts = 0,
@@ -74,22 +77,26 @@ local function appendHistory(buf, val)
 end
 
 local function publishStatus()
+    local currentDev = if isDirty or isMutating then pendingState else deviceState
     noctalia.state.set("status", {
         available = isAvailable,
         device = {
-            enabled = deviceState.enabled,
-            saturation = deviceState.saturation,
-            contrast = deviceState.contrast,
-            brightness = deviceState.brightness,
+            enabled = currentDev.enabled,
+            saturation = currentDev.saturation,
+            contrast = currentDev.contrast,
+            brightness = currentDev.brightness,
         },
         telemetry = {
             card = telemetryState.card,
             pci_id = telemetryState.pci_id,
             device_id = telemetryState.device_id,
+            is_apu = telemetryState.is_apu,
             gpu_busy_percent = telemetryState.gpu_busy_percent,
             sclk_mhz = telemetryState.sclk_mhz,
             vram_used_mib = telemetryState.vram_used_mib,
             vram_total_mib = telemetryState.vram_total_mib,
+            gtt_used_mib = telemetryState.gtt_used_mib,
+            gtt_total_mib = telemetryState.gtt_total_mib,
             temp_edge_c = telemetryState.temp_edge_c,
             temp_junction_c = telemetryState.temp_junction_c,
             power_watts = telemetryState.power_watts,
@@ -123,16 +130,21 @@ local function pollStatus(onComplete)
                 -- Safely parse device state with fallback defaults
                 local dev = parsed.device
                 if type(dev) == "table" then
-                    deviceState.enabled = if type(dev.enabled) == "number" then dev.enabled else 1
-                    deviceState.saturation = if type(dev.saturation) == "number" then dev.saturation else 100
-                    deviceState.contrast = if type(dev.contrast) == "number" then dev.contrast else 100
-                    deviceState.brightness = if type(dev.brightness) == "number" then dev.brightness else 0
+                    local hwEnabled = if type(dev.enabled) == "number" then dev.enabled else 1
+                    local hwSat = if type(dev.saturation) == "number" then dev.saturation else 100
+                    local hwCon = if type(dev.contrast) == "number" then dev.contrast else 100
+                    local hwBri = if type(dev.brightness) == "number" then dev.brightness else 0
 
-                    if not isDirty then
-                        pendingState.enabled = deviceState.enabled
-                        pendingState.saturation = deviceState.saturation
-                        pendingState.contrast = deviceState.contrast
-                        pendingState.brightness = deviceState.brightness
+                    if not isDirty and not isMutating then
+                        deviceState.enabled = hwEnabled
+                        deviceState.saturation = hwSat
+                        deviceState.contrast = hwCon
+                        deviceState.brightness = hwBri
+
+                        pendingState.enabled = hwEnabled
+                        pendingState.saturation = hwSat
+                        pendingState.contrast = hwCon
+                        pendingState.brightness = hwBri
                     end
                 end
 
@@ -142,17 +154,22 @@ local function pollStatus(onComplete)
                     telemetryState.card = if type(telem.card) == "string" and telem.card ~= "" then telem.card else "amdgpu"
                     telemetryState.pci_id = if type(telem.pci_id) == "string" then telem.pci_id else ""
                     telemetryState.device_id = if type(telem.device_id) == "string" then telem.device_id else ""
+                    telemetryState.is_apu = (telem.is_apu == true)
                     telemetryState.gpu_busy_percent = if type(telem.gpu_busy_percent) == "number" then telem.gpu_busy_percent else 0
                     telemetryState.sclk_mhz = if type(telem.sclk_mhz) == "number" then telem.sclk_mhz else 0
                     telemetryState.vram_used_mib = if type(telem.vram_used_mib) == "number" then telem.vram_used_mib else 0
                     telemetryState.vram_total_mib = if type(telem.vram_total_mib) == "number" then telem.vram_total_mib else 0
+                    telemetryState.gtt_used_mib = if type(telem.gtt_used_mib) == "number" then telem.gtt_used_mib else 0
+                    telemetryState.gtt_total_mib = if type(telem.gtt_total_mib) == "number" then telem.gtt_total_mib else 0
                     telemetryState.temp_edge_c = if type(telem.temp_edge_c) == "number" then telem.temp_edge_c else 0
                     telemetryState.temp_junction_c = if type(telem.temp_junction_c) == "number" then telem.temp_junction_c else 0
                     telemetryState.power_watts = if type(telem.power_watts) == "number" then telem.power_watts else 0
                 end
 
+                local effectiveTemp = if telemetryState.temp_junction_c > 0 then telemetryState.temp_junction_c else telemetryState.temp_edge_c
+
                 appendHistory(historyGpu, telemetryState.gpu_busy_percent)
-                appendHistory(historyTempJunc, telemetryState.temp_junction_c)
+                appendHistory(historyTempJunc, effectiveTemp)
                 appendHistory(historyPower, telemetryState.power_watts)
                 appendHistory(historySclk, telemetryState.sclk_mhz)
 
@@ -207,6 +224,8 @@ local function flushSetCommand()
     local bri = pendingState.brightness
     local en = pendingState.enabled
 
+    publishStatus()
+
     local cmd = `prisma-ctl set -s {sat} -c {con} -b {bri} -e {en}`
     noctalia.runAsync(cmd, function(result)
         isMutating = false
@@ -220,6 +239,7 @@ local function flushSetCommand()
             lastErrorMessage = noctalia.string.trim(result.stderr or result.stdout or "Falha ao aplicar parâmetros")
             log(`Erro ao aplicar comando set: {lastErrorMessage}`)
         end
+        publishStatus()
         pollStatus()
     end)
 end
@@ -240,6 +260,8 @@ local function handleCommand(cmd)
         if type(cmd.enabled) == "number" then
             pendingState.enabled = if cmd.enabled ~= 0 then 1 else 0
         end
+
+        publishStatus()
 
         if cmd.immediate then
             flushSetCommand()

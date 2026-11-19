@@ -12,12 +12,18 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Install Luau
+        run: |
+          mkdir -p "$RUNNER_TEMP/luau"
+          curl --fail --location --silent --show-error https://github.com/luau-lang/luau/releases/download/0.747/luau-ubuntu.zip -o "$RUNNER_TEMP/luau.zip"
+          echo "6a740240248e872815865a2cb03b0c327f24939478f1d0081a0540cdfd77fdaa  $RUNNER_TEMP/luau.zip" | sha256sum -c
+          unzip -q "$RUNNER_TEMP/luau.zip" -d "$RUNNER_TEMP/luau"
       - name: Build and test the standard CLI
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           cmake --build build --parallel
           cmake --build build --target test_kernel_abi
-          ctest --test-dir build --output-on-failure
+          LUAU_BIN="$RUNNER_TEMP/luau/luau" LUAU_REQUIRE_VM=1 ctest --test-dir build --output-on-failure
           cmake --install build --prefix "$RUNNER_TEMP/prisma"
           "$RUNNER_TEMP/prisma/bin/prisma-ctl" --version
       - name: Analyze C++ and test both legacy builds
@@ -28,15 +34,11 @@ jobs:
           cmake -S . -B build-legacy -DCMAKE_BUILD_TYPE=Release -DPRISMA_BUILD_LEGACY_DRM=ON -DPRISMA_BUILD_LEGACY_VULKAN=ON
           cmake --build build-legacy --parallel
           cmake --build build-legacy --target test_vkms_ctm
-          ctest --test-dir build-legacy --output-on-failure
+          LUAU_BIN="$RUNNER_TEMP/luau/luau" LUAU_REQUIRE_VM=1 ctest --test-dir build-legacy --output-on-failure
       - name: Validate Noctalia plugin
         run: |
-          mkdir -p "$RUNNER_TEMP/luau"
-          curl --fail --location --silent --show-error https://github.com/luau-lang/luau/releases/download/0.747/luau-ubuntu.zip -o "$RUNNER_TEMP/luau.zip"
-          echo "6a740240248e872815865a2cb03b0c327f24939478f1d0081a0540cdfd77fdaa  $RUNNER_TEMP/luau.zip" | sha256sum -c
-          unzip -q "$RUNNER_TEMP/luau.zip" -d "$RUNNER_TEMP/luau"
           "$RUNNER_TEMP/luau/luau-compile" --null ui/prisma/*.luau
-          python3 tests/check_ui.py
+          LUAU_BIN="$RUNNER_TEMP/luau/luau" LUAU_REQUIRE_VM=1 python3 tests/check_ui.py
 
   arch-package:
     runs-on: ubuntu-24.04

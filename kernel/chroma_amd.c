@@ -10,6 +10,7 @@
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/pci.h>
 #include <linux/pm_runtime.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -190,6 +191,22 @@ static bool chroma_has_ctm(struct drm_crtc *crtc)
 	return false;
 }
 
+static bool chroma_is_identity_ctm(const struct drm_color_ctm *ctm)
+{
+	int i;
+
+	if (!ctm)
+		return true;
+
+	for (i = 0; i < 9; ++i) {
+		u64 expected = (i == 0 || i == 4 || i == 8) ? (1ULL << 32) : 0ULL;
+
+		if (ctm->matrix[i] != expected)
+			return false;
+	}
+	return true;
+}
+
 static int chroma_update_crtc(struct drm_crtc *crtc,
 			      struct drm_property_blob **owned,
 			      const struct drm_color_ctm *target)
@@ -198,6 +215,8 @@ static int chroma_update_crtc(struct drm_crtc *crtc,
 	struct drm_property_blob *candidate;
 	struct drm_crtc_state *new_state;
 	struct chroma_atomic_state *state;
+	bool allow_modeset = false;
+	bool is_transition;
 	int ret;
 
 	drm_modeset_acquire_init(&ctx, 0);
@@ -210,21 +229,45 @@ static int chroma_update_crtc(struct drm_crtc *crtc,
 		if (*owned && crtc->state->ctm != *owned)
 			drm_property_replace_blob(owned, NULL);
 		if (target) {
-			if (!crtc->state->active || (crtc->state->ctm && !*owned))
+			if (!crtc->state->active) {
+				pr_debug("chroma_amd: %s CRTC %u is not active, skipping\n",
+					 dev_name(crtc->dev->dev), crtc->base.id);
 				break;
+			}
+			if (crtc->state->ctm && !*owned) {
+				const struct drm_color_ctm *ext_ctm;
+
+				if (crtc->state->ctm->length < sizeof(struct drm_color_ctm)) {
+					pr_debug("chroma_amd: %s CRTC %u has malformed external CTM blob (length %zu), skipping\n",
+						 dev_name(crtc->dev->dev), crtc->base.id,
+						 crtc->state->ctm->length);
+					break;
+				}
+				ext_ctm = crtc->state->ctm->data;
+				if (!chroma_is_identity_ctm(ext_ctm)) {
+					pr_debug("chroma_amd: %s CRTC %u has active non-identity external CTM, skipping\n",
+						 dev_name(crtc->dev->dev), crtc->base.id);
+					break;
+				}
+				pr_debug("chroma_amd: %s CRTC %u has identity CTM, adopting CRTC\n",
+					 dev_name(crtc->dev->dev), crtc->base.id);
+			}
 			if (*owned && !memcmp((*owned)->data, target, sizeof(*target)))
 				break;
 		} else if (!*owned) {
 			break;
 		}
 
+		is_transition = (!*owned || !target);
+
+commit_state:
 		state = chroma_atomic_alloc(crtc->dev);
 		if (!state) {
 			ret = -ENOMEM;
 			break;
 		}
 		state->acquire_ctx = &ctx;
-		state->allow_modeset = false;
+		state->allow_modeset = allow_modeset;
 		candidate = NULL;
 		new_state = drm_atomic_get_crtc_state(state, crtc);
 		if (IS_ERR(new_state)) {
@@ -243,9 +286,25 @@ static int chroma_update_crtc(struct drm_crtc *crtc,
 		ret = drm_atomic_commit(state);
 		if (!ret) {
 			drm_property_replace_blob(owned, candidate);
-			pr_debug("chroma_amd: %s CRTC %u CTM blob %u\n",
-				 dev_name(crtc->dev->dev), crtc->base.id,
-				 candidate ? candidate->base.id : 0);
+			if (allow_modeset) {
+				pr_debug("chroma_amd: %s CRTC %u CTM blob %u (fallback allow_modeset=true confirmed)\n",
+					 dev_name(crtc->dev->dev), crtc->base.id,
+					 candidate ? candidate->base.id : 0);
+			} else {
+				pr_debug("chroma_amd: %s CRTC %u CTM blob %u\n",
+					 dev_name(crtc->dev->dev), crtc->base.id,
+					 candidate ? candidate->base.id : 0);
+			}
+		} else if (ret == -EINVAL && !allow_modeset && is_transition) {
+			pr_debug("chroma_amd: %s CRTC %u fast commit failed (-EINVAL), retrying with allow_modeset=true\n",
+				 dev_name(crtc->dev->dev), crtc->base.id);
+			drm_property_blob_put(candidate);
+			chroma_atomic_put(state);
+			allow_modeset = true;
+			goto commit_state;
+		} else if (ret == -EBUSY) {
+			pr_debug("chroma_amd: %s CRTC %u atomic commit returned -EBUSY (flip in flight)\n",
+				 dev_name(crtc->dev->dev), crtc->base.id);
 		}
 		drm_property_blob_put(candidate);
 put_state:
@@ -275,11 +334,15 @@ static int chroma_update_gpu(struct chroma_gpu *gpu, const struct drm_color_ctm 
 	if (!target) {
 		for (i = 0; i < gpu->num_crtcs && !gpu->owned[i]; ++i)
 			;
-		if (i == gpu->num_crtcs)
+		if (i == gpu->num_crtcs) {
+			pr_debug("chroma_amd: %s: no owned CRTCs to reset\n", dev_name(dev->dev));
 			return 0;
+		}
 	}
-	if (!drm_dev_enter(dev, &idx))
+	if (!drm_dev_enter(dev, &idx)) {
+		pr_debug("chroma_amd: %s: drm_dev_enter failed (device unplugged?)\n", dev_name(dev->dev));
 		return -ENODEV;
+	}
 	pm = pm_runtime_get_if_active(dev->dev);
 	if (pm != 0) {
 		drm_for_each_crtc(crtc, dev) {
@@ -290,18 +353,26 @@ static int chroma_update_gpu(struct chroma_gpu *gpu, const struct drm_color_ctm 
 			if (i >= gpu->num_crtcs)
 				continue;
 			owned = &gpu->owned[i];
-			if ((!target && !*owned) || !chroma_has_ctm(crtc))
+			if (!chroma_has_ctm(crtc)) {
+				pr_debug("chroma_amd: %s CRTC %u: no CTM property\n",
+					 dev_name(dev->dev), crtc->base.id);
+				continue;
+			}
+			if (!target && !*owned)
 				continue;
 			err = chroma_update_crtc(crtc, owned, target);
 			if (err) {
 				ret = err;
-				pr_warn_ratelimited("chroma_amd: %s CRTC %u: CTM commit failed: %pe\n",
-						    dev_name(dev->dev), crtc->base.id, ERR_PTR(err));
+				if (err != -EBUSY)
+					pr_warn_ratelimited("chroma_amd: %s CRTC %u: CTM commit failed: %pe\n",
+							    dev_name(dev->dev), crtc->base.id, ERR_PTR(err));
 			}
 		}
 		if (pm > 0)
 			__pm_runtime_put_autosuspend(dev->dev);
 	} else {
+		pr_debug("chroma_amd: %s: pm_runtime_get_if_active returned 0 (device suspended/idle)\n",
+			 dev_name(dev->dev));
 		ret = -EAGAIN;
 	}
 	drm_dev_exit(idx);
@@ -327,6 +398,37 @@ static void chroma_forget_gpu(struct chroma_gpu *gpu)
 		drm_property_blob_put(gpu->owned[i]);
 	chroma_put_gpu(gpu->dev, gpu->owner);
 	kfree(gpu);
+}
+
+static bool chroma_try_enqueue_locked(struct drm_device *dev)
+{
+	struct chroma_gpu *gpu;
+	unsigned int i, slot = ARRAY_SIZE(pending);
+
+	if (!dev || !dev->driver || !dev->driver->fops)
+		return false;
+
+	list_for_each_entry(gpu, &gpus, link) {
+		if (gpu->dev == dev)
+			return false;
+	}
+	for (i = 0; i < ARRAY_SIZE(pending); ++i) {
+		if (pending[i] == dev)
+			return false;
+		if (!pending[i] && slot == ARRAY_SIZE(pending))
+			slot = i;
+	}
+	if (slot == ARRAY_SIZE(pending)) {
+		pr_debug("chroma_amd: pending slots full, cannot enqueue %s\n", dev_name(dev->dev));
+		return false;
+	}
+	if (!try_module_get(dev->driver->fops->owner)) {
+		pr_debug("chroma_amd: try_module_get failed for %s owner\n", dev_name(dev->dev));
+		return false;
+	}
+	drm_dev_get(dev);
+	pending[slot] = dev;
+	return true;
 }
 
 static void chroma_collect_gpus(void)
@@ -368,13 +470,53 @@ static void chroma_collect_gpus(void)
 	}
 }
 
+static void chroma_scan_pci(void)
+{
+	struct pci_dev *pdev = NULL;
+	bool enqueued = false;
+
+	while ((pdev = pci_get_device(PCI_VENDOR_ID_ATI, PCI_ANY_ID, pdev)) != NULL) {
+		struct drm_device *dev = NULL;
+		unsigned long flags;
+		bool enq = false;
+
+		if ((pdev->class >> 16) != PCI_BASE_CLASS_DISPLAY)
+			continue;
+
+		device_lock(&pdev->dev);
+		if (pdev->driver && pdev->driver->name && !strcmp(pdev->driver->name, "amdgpu")) {
+			dev = pci_get_drvdata(pdev);
+			if (dev && READ_ONCE(dev->registered) && dev->mode_config.ctm_property) {
+				raw_spin_lock_irqsave(&discovery_lock, flags);
+				enq = chroma_try_enqueue_locked(dev);
+				raw_spin_unlock_irqrestore(&discovery_lock, flags);
+				if (enq) {
+					enqueued = true;
+					pr_debug("chroma_amd: proactive PCI scan enqueued %s (%s)\n",
+						 dev_name(dev->dev), pci_name(pdev));
+				}
+			}
+		}
+		device_unlock(&pdev->dev);
+	}
+
+	if (enqueued)
+		chroma_collect_gpus();
+}
+
+#define CHROMA_MAX_BUSY_RETRIES 5
+static unsigned int busy_retry_count;
+
 static void chroma_refresh(struct work_struct *work)
 {
 	struct prisma_ioctl_state snapshot;
-	struct chroma_gpu *gpu, *next;
+	struct chroma_gpu *gpu, *next, *gpu_count;
 	struct drm_color_ctm ctm;
 	struct drm_color_ctm *target = NULL;
+	unsigned int num_gpus = 0, num_pending = 0;
+	unsigned int p_idx;
 	unsigned long flags;
+	bool had_ebusy = false;
 
 	raw_spin_lock_irqsave(&discovery_lock, flags);
 	refresh_queued = false;
@@ -382,7 +524,20 @@ static void chroma_refresh(struct work_struct *work)
 		raw_spin_unlock_irqrestore(&discovery_lock, flags);
 		return;
 	}
+	list_for_each_entry(gpu_count, &gpus, link)
+		num_gpus++;
+	for (p_idx = 0; p_idx < ARRAY_SIZE(pending); ++p_idx) {
+		if (pending[p_idx])
+			num_pending++;
+	}
 	raw_spin_unlock_irqrestore(&discovery_lock, flags);
+
+	pr_debug("chroma_amd: refresh: %u tracked GPUs, %u pending\n", num_gpus, num_pending);
+
+	if (list_empty(&gpus)) {
+		pr_debug("chroma_amd: no tracked GPUs, initiating proactive PCI scan\n");
+		chroma_scan_pci();
+	}
 
 	snapshot = chroma_snapshot();
 	if (snapshot.enabled &&
@@ -392,10 +547,34 @@ static void chroma_refresh(struct work_struct *work)
 	}
 	chroma_collect_gpus();
 	list_for_each_entry_safe(gpu, next, &gpus, link) {
-		chroma_update_gpu(gpu, target);
+		int err = chroma_update_gpu(gpu, target);
+
+		if (err == -EBUSY)
+			had_ebusy = true;
 		if (drm_dev_is_unplugged(gpu->dev))
 			chroma_forget_gpu(gpu);
 	}
+
+	if (had_ebusy) {
+		if (busy_retry_count < CHROMA_MAX_BUSY_RETRIES) {
+			busy_retry_count++;
+			pr_debug("chroma_amd: rescheduling refresh due to -EBUSY (retry %u/%u)\n",
+				 busy_retry_count, CHROMA_MAX_BUSY_RETRIES);
+			raw_spin_lock_irqsave(&discovery_lock, flags);
+			if (!paused && !refresh_queued) {
+				refresh_queued = true;
+				queue_work(chroma_wq, &refresh_work);
+			}
+			raw_spin_unlock_irqrestore(&discovery_lock, flags);
+		} else {
+			pr_warn_ratelimited("chroma_amd: exceeded maximum -EBUSY retries (%u)\n",
+					    CHROMA_MAX_BUSY_RETRIES);
+			busy_retry_count = 0;
+		}
+	} else {
+		busy_retry_count = 0;
+	}
+
 	raw_spin_lock_irqsave(&discovery_lock, flags);
 	if (!paused && !list_empty(&gpus) && !timer_pending(&recheck_timer))
 		mod_timer(&recheck_timer, jiffies + CHROMA_RECHECK);
@@ -408,34 +587,19 @@ static void chroma_refresh(struct work_struct *work)
 static int chroma_observe(struct kprobe *probe, struct pt_regs *regs)
 {
 	struct drm_device *dev = (void *)regs_get_kernel_argument(regs, 0);
-	struct chroma_gpu *gpu;
-	unsigned int i, slot = ARRAY_SIZE(pending);
 	unsigned long flags;
 	bool discovered = false;
 
-	if (!dev || !dev->driver->name || strcmp(dev->driver->name, "amdgpu") ||
+	if (!dev || !dev->driver || !dev->driver->name || strcmp(dev->driver->name, "amdgpu") ||
 	    !READ_ONCE(dev->registered) || !dev->mode_config.ctm_property)
 		return 0;
+
 	/* An INT3 probe can enter with NMI accounting. Defer on contention. */
 	if (!raw_spin_trylock_irqsave(&discovery_lock, flags))
 		return 0;
-	list_for_each_entry(gpu, &gpus, link) {
-		if (gpu->dev == dev)
-			goto out;
-	}
-	for (i = 0; i < ARRAY_SIZE(pending); ++i) {
-		if (pending[i] == dev)
-			goto out;
-		if (!pending[i] && slot == ARRAY_SIZE(pending))
-			slot = i;
-	}
-	if (slot != ARRAY_SIZE(pending) && try_module_get(dev->driver->fops->owner)) {
-		drm_dev_get(dev);
-		pending[slot] = dev;
-		discovered = true;
-	}
-out:
+	discovered = chroma_try_enqueue_locked(dev);
 	raw_spin_unlock_irqrestore(&discovery_lock, flags);
+
 	if (discovered)
 		irq_work_queue(&discovery_irq);
 	return 0;
@@ -691,8 +855,10 @@ static int __init chroma_init(void)
 	if (ret)
 		goto put_kobj;
 	ret = misc_register(&chroma_misc_dev);
-	if (!ret)
+	if (!ret) {
+		chroma_schedule();
 		return 0;
+	}
 
 	sysfs_remove_groups(chroma_kobj, chroma_groups);
 put_kobj:

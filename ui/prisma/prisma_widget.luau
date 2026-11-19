@@ -34,31 +34,34 @@ local function updateDisplay()
         barWidget.setGlyphColor("on_surface_variant")
     end
 
+    local hasHotspot = (type(telem.temp_junction_c) == "number" and telem.temp_junction_c > 0)
+    local tempJunc = if hasHotspot then telem.temp_junction_c else 0
+    local tempEdge = if type(telem.temp_edge_c) == "number" then telem.temp_edge_c else 0
+    local primaryTemp = if hasHotspot then tempJunc else tempEdge
+    local primaryTempRounded = math.floor(primaryTemp + 0.5)
+
     local metricStr = ""
     local metricChoice = if type(barMetric) == "string" and barMetric ~= "" then barMetric else "hotspot"
 
     if metricChoice == "edge" then
-        local tempEdge = if type(telem.temp_edge_c) == "number" then telem.temp_edge_c else 0
         metricStr = `{math.floor(tempEdge + 0.5)}°C`
     elseif metricChoice == "gpu_busy" then
         local gpuBusy = if type(telem.gpu_busy_percent) == "number" then telem.gpu_busy_percent else 0
         metricStr = `{gpuBusy}%`
     else
-        local tempJunc = if type(telem.temp_junction_c) == "number" then telem.temp_junction_c else 0
-        metricStr = `{math.floor(tempJunc + 0.5)}°C`
+        metricStr = `{primaryTempRounded}°C`
     end
 
     barWidget.setText(metricStr)
 
     local gpuBusy = if type(telem.gpu_busy_percent) == "number" then telem.gpu_busy_percent else 0
-    local tempJunc = if type(telem.temp_junction_c) == "number" then math.floor(telem.temp_junction_c + 0.5) else 0
     local powerW = if type(telem.power_watts) == "number" then math.floor(telem.power_watts + 0.5) else 0
     local sat = if type(dev.saturation) == "number" then dev.saturation else 100
     local con = if type(dev.contrast) == "number" then dev.contrast else 100
     local bri = if type(dev.brightness) == "number" then dev.brightness else 0
 
     local tooltip = `Prisma Control Center\n`
-        .. `GPU: {gpuBusy}% | Hotspot: {tempJunc}°C | Consumo: {powerW}W\n`
+        .. `GPU: {gpuBusy}% | {if hasHotspot then "Hotspot" else "Borda"}: {primaryTempRounded}°C | Consumo: {powerW}W\n`
         .. `Saturação: {sat}% | Contraste: {con}% | Brilho: {bri}%`
 
     barWidget.setTooltip(tooltip)

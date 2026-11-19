@@ -22,15 +22,15 @@ flowchart TD
 
 ### 1.1. Camada de kernel
 
-`drm_atomic_helper_commit()` recebe um estado que já passou pela validação atômica. O Kprobe verifica se o dispositivo AMDGPU anunciado tem CTM, incrementa referências do DRM e do módulo do driver, e agenda trabalho. A sonda usa trylock sobre um spinlock bruto para a lista e os slots de descoberta. IRQ work sinaliza a fila quando o breakpoint roda com contexto NMI. A referência retida é a do dispositivo. A fila ordenada aloca os registros por dispositivo em contexto de processo. Um novo commit do compositor pode repetir uma descoberta descartada por falta de memória ou por lotação temporária dos slots.
+O subsistema de kernel (`kernel/chroma_amd.ko`) é responsável pela aplicação atômica da calibração de cor em hardware via DRM/KMS e pelo rastreamento seguro de placas AMDGPU:
+- **Descoberta Híbrida de GPUs:** Combina uma varredura PCI ativa e proativa (`chroma_scan_pci`), executada no carregamento do módulo (`insmod`) e sempre que a lista de GPUs estiver vazia, com um `kprobe` no ponto de commit do DRM (`drm_atomic_helper_commit`). A varredura PCI itera adaptadores com `PCI_VENDOR_ID_ATI` e classe `PCI_BASE_CLASS_DISPLAY`, obtém o `struct drm_device` via `pci_get_drvdata(pdev)` sob `device_lock`, valida o registro do driver `"amdgpu"` e enfileira o dispositivo com retenção de referências do DRM (`drm_dev_get`) e do módulo (`try_module_get`). O `kprobe` é estritamente livre de `printk` para preservar contextos INT3/NMI e kernels PREEMPT_RT.
+- **Preservação Inteligente de CTM Externa vs. Matriz Identidade:** Ao avaliar os CRTCs elegíveis com suporte à propriedade `ctm`, o módulo inspeciona os 9 coeficientes em ponto fixo DRM S31.32 (`chroma_is_identity_ctm`). Se o CRTC estiver sem CTM ou possuir uma matriz identidade padrão aplicada pelo compositor Wayland (`1.0` nas diagonais e `0` nos demais), o Prisma assume o CRTC (`adopting CRTC`). Se o compositor tiver aplicado uma matriz externa de cor ativa (como Night Light / ICC), o Prisma cede o CRTC e não interfere.
+- **Fallback Automático de Modeset para DCN 2.x:** Em hardware AMD DCN 2.1 (ex.: APUs Cezanne/Vega), o driver `amdgpu_dm` exige `allow_modeset = true` durante a transição inicial de vinculação (`!*owned`) ou remoção (`!target`) da matriz CTM para recalcular blocos de cor DPP/MPC, rejeitando o fast path com `-EINVAL`. O módulo tenta primeiramente o fast path `state->allow_modeset = false` (evitando flicker em ajustes contínuos de slider) e, se receber `-EINVAL` durante uma transição, efetua uma nova tentativa atômica controlada com `state->allow_modeset = true`.
+- **Tratamento de Contenção `-EBUSY`:** Caso o commit atômico conflite com um pageflip em andamento do compositor retornando `-EBUSY`, a fila ordenada reagenda a execução de forma assíncrona com limite seguro (`CHROMA_MAX_BUSY_RETRIES = 5`) para evitar perda de comando e loops infinitos.
 
-O dispositivo de caractere usa ABI v1 com leitura textual, `GET_ABI`, `GET_STATE` e `SET_STATE`. Escritas textuais parciais preservam os campos omitidos e são validadas integralmente sob o mutex de configuração. As leituras por ioctl recebem uma única cópia coerente. Sysfs expõe os campos individuais em modo de leitura.
+O dispositivo de caractere usa ABI v1 com leitura textual, `GET_ABI`, `GET_STATE` e `SET_STATE`. Escritas textuais parciais preservam os campos omitidos e são validadas integralmente sob o mutex de configuração. As leituras por ioctl recebem uma única cópia coerente. Sysfs expõe os campos individuais em modo de leitura em `/sys/kernel/chroma_amd/`.
 
-A fila calcula a matriz Rec.709 em S31.32 por aritmética inteira. O ganho de brilho varia entre 0,25× e 1,75×. Para cada CRTC ativo com propriedade CTM, o módulo obtém o lock de modeset, lê o blob atual e avalia a propriedade. Só assume um CRTC sem CTM. Cria um novo estado atômico, marca `color_mgmt_changed` e chama `drm_atomic_commit()`, com tratamento de `-EDEADLK` e sem permitir mudança de modo. O driver valida o novo estado antes de programá-lo. A confirmação de sucesso transfere uma referência ao registro daquele CRTC.
-
-Ao desativar ou usar parâmetros neutros, o workqueue restaura bypass somente nos CRTCs em que a referência instalada ainda é a CTM atual. Quando detecta outro blob, libera a referência antiga. Um timer agenda a reavaliação dos dispositivos conhecidos a cada dois segundos para lidar com mudanças de propriedade, atividade da saída, falhas transitórias e remoção. A atualização explícita da configuração agenda um trabalho imediato. Pedidos de atualização simultâneos compartilham a execução já pendente.
-
-`drm_dev_enter()` protege as operações durante remoção do AMDGPU. Cada registro mantém referências do dispositivo e do módulo do driver até ser descartado. Ao remover o driver AMDGPU manualmente, descarregue `chroma_amd` primeiro. A fila pausa antes da suspensão e retoma após o evento de PM. O descarregamento retira a sonda, sincroniza o IRQ work, cancela a fila, tenta limpar os blobs próprios e solta as referências. A restauração pode falhar se o driver rejeitar o commit ou estiver suspenso.
+Ao desativar ou usar parâmetros neutros, o workqueue restaura bypass somente nos CRTCs em que a referência instalada ainda é a CTM atual. Quando detecta outro blob, libera a referência antiga. Um timer agenda a reavaliação dos dispositivos conhecidos a cada dois segundos para lidar com mudanças de propriedade, atividade da saída, falhas transitórias e remoção. `drm_dev_enter()` protege as operações durante remoção do AMDGPU. A fila pausa antes da suspensão e retoma após o evento de PM. O descarregamento retira a sonda, sincroniza o IRQ work, cancela a fila, restaura as saídas para bypass e libera as referências.
 
 ### 1.2. Camada 2: Userspace CLI & Telemetria (`src/cli/`)
 
@@ -44,11 +44,13 @@ A interface de controle de usuário é construída em C++20 com quatro responsab
 
 Interface gráfica oficial integrada ao Noctalia Shell no compositor Niri:
 - **`plugin.toml`:** Manifesto do plugin com metadados, configurações do usuário (métrica da barra e ocultação quando inativo), declaração do serviço em background, do widget de barra e do painel flutuante.
-- **`prisma_service.luau`:** Serviço persistente que monitora o estado do hardware e despacha comandos assíncronos (`prisma-ctl status --json`, `prisma-ctl set`, `prisma-ctl profile`). Implementa pooling adaptativo (1000ms com painel aberto, 2000ms em repouso) e debounce de 40ms para comandos interativos.
-- **`prisma_widget.luau`:** Widget exibido na barra do Noctalia Shell com o ícone de paleta, métrica selecionada (Hotspot, Borda ou Carga) e tooltip com resumo de sensores.
-- **`prisma_panel.luau`:** Central de controle interativa estruturada em 3 abas:
-  - **Desempenho:** Indicadores proporcionais de carga da GPU, clock SCLK, temperatura de silício/borda, consumo elétrico e alocação de VRAM, além de identificador de hardware.
-  - **Tela & Cor:** Chave mestre de calibragem, trackbars interativas de 25 segmentos clicáveis para Saturação, Contraste e Brilho, campo de entrada numérica direta (`width = 64`), botões de ajuste fino (`-1`/`+1`), restauração individual e presets rápidos (Padrão, Competitivo, Cinema e Monocromático).
+- **`prisma_service.luau`:** Serviço persistente que monitora o estado do hardware e despacha comandos assíncronos (`prisma-ctl status --json`, `prisma-ctl set`, `prisma-ctl profile`). Implementa pooling adaptativo (1000ms com painel aberto, 2000ms em repouso) e debounce de 40ms para comandos interativos. Publica atualizações de forma otimista (`currentDev = if isDirty or isMutating then pendingState else deviceState`) e protege o estado contra snapshots de hardware obsoletos em trânsito.
+- **`prisma_widget.luau`:** Widget exibido na barra do Noctalia Shell com o ícone de paleta, métrica selecionada (Hotspot, Borda ou Carga) e tooltip com resumo de sensores. Em APUs sem sensor Hotspot (`temp_junction_c`), adota fallback automático para a temperatura de encapsulamento (`temp_edge_c`).
+- **`prisma_panel.luau`:** Central de controle interativa estruturada em 3 abas com imunidade a *snap-back* de sliders:
+  - **Desempenho:** Indicadores proporcionais com escala dinâmica inteligente:
+    - *APUs (ex.: Ryzen 5 5600GT):* Teto de potência ajustado para 65W (PPT), exibição unificada de memória `VRAM + GTT` (ex.: 512 MiB VRAM + GTT do sistema) e fallback limpo para sensor único de borda.
+    - *dGPUs (ex.: RX 9060 XT):* Teto de potência de 300W, alocação de memória VRAM dedicada física e exibição simultânea de Hotspot e Borda.
+  - **Tela & Cor:** Chave mestre de calibragem, trackbars interativas de 25 segmentos clicáveis para Saturação, Contraste e Brilho, campo de entrada numérica direta (`width = 64`), botões de ajuste fino (`-1`/`+1`), restauração individual e presets rápidos (Padrão, Competitivo, Cinema e Monocromático). Mantém `hasPendingColorUpdate` para reter o valor clicado localmente até confirmação do driver.
   - **Perfis:** Formulário de salvamento do estado atual, listagem de perfis salvos com ações de aplicar/remover e restauração aos padrões de fábrica.
 
 ---
@@ -93,10 +95,13 @@ O comando `prisma-ctl status --json` emite um objeto JSON no stdout com a seguin
     "card": "card1",
     "pci_id": "0000:2d:00.0",
     "device_id": "1002:7590",
+    "is_apu": false,
     "gpu_busy_percent": 7,
     "sclk_mhz": 964,
     "vram_used_mib": 1304.5,
     "vram_total_mib": 16304.0,
+    "gtt_used_mib": 412.0,
+    "gtt_total_mib": 16000.0,
     "temp_edge_c": 41.0,
     "temp_junction_c": 43.0,
     "power_watts": 22.0
@@ -122,10 +127,13 @@ O comando `prisma-ctl status --json` emite um objeto JSON no stdout com a seguin
 | `card` | String \| null | `"card0"`, `"card1"` | Nome do nó do dispositivo no DRM (`/sys/class/drm/`). |
 | `pci_id` | String \| null | `"0000:2d:00.0"` | Identificador do slot PCI no barramento do sistema. |
 | `device_id` | String \| null | `"1002:7590"` | Identificador de fornecedor e dispositivo PCI da GPU AMD. |
+| `is_apu` | Booleano | `true` ou `false` | Indica se o hardware é uma APU (GPU integrada com memória compartilhada). |
 | `gpu_busy_percent` | Inteiro \| null | `0` a `100` | Porcentagem instantânea de utilização dos compute engines da GPU. |
 | `sclk_mhz` | Inteiro \| null | Inteiro em MHz | Frequência de clock ativa do chip gráfico (extraída de `pp_dpm_sclk`). |
 | `vram_used_mib` | Float \| null | Flutuante (MiB) | Quantidade de memória VRAM atualmente alocada pelo driver. |
 | `vram_total_mib` | Float \| null | Flutuante (MiB) | Capacidade total de memória VRAM física disponível na GPU. |
+| `gtt_used_mib` | Float \| null | Flutuante (MiB) | Quantidade de memória do sistema (GTT) atualmente alocada para gráficos. |
+| `gtt_total_mib` | Float \| null | Flutuante (MiB) | Capacidade total de memória do sistema alocável para a GPU via GTT. |
 | `temp_edge_c` | Float \| null | Flutuante (°C) | Temperatura do sensor de borda (`edge`) do encapsulamento da GPU. |
 | `temp_junction_c` | Float \| null | Flutuante (°C) | Temperatura do ponto mais quente da matriz de silício (`junction` / Hotspot). |
 | `power_watts` | Float \| null | Flutuante (W) | Consumo elétrico instantâneo em Watts reportado pelo sensor do regulador. |
@@ -136,7 +144,15 @@ O comando `prisma-ctl status --json` emite um objeto JSON no stdout com a seguin
 
 ## 4. Compilação e testes
 
-O CMake padrão constrói a CLI e os testes de userspace. Os caminhos históricos em `src/layer.cpp` e `src/drm_hook.cpp` têm opções de compilação independentes, descritas no README. O PKGBUILD instala a CLI, a fonte DKMS, a regra udev e os arquivos do plugin. `tests/test_kernel_abi.cpp` cobre o dispositivo real em uma VM. Os testes de CTM em VKMS usam um módulo de teste e um driver virtual configurado para expor a propriedade.
+O CMake padrão constrói a CLI e os testes de userspace (`test_cli` e `check_ui`). Os caminhos históricos em `src/layer.cpp` e `src/drm_hook.cpp` têm opções de compilação independentes, descritas no README. O PKGBUILD instala a CLI, a fonte DKMS, a regra udev e os arquivos do plugin. `tests/test_kernel_abi.cpp` cobre o dispositivo real em uma VM. Os testes de CTM em VKMS usam um módulo de teste e um driver virtual configurado para expor a propriedade.
+
+### Suíte de Testes Comportamentais da UI Luau (`tests/test_ui.luau`)
+
+Integrada ao CTest através de `tests/check_ui.py`, a suíte executa os scripts reais `prisma_service.luau`, `prisma_widget.luau` e `prisma_panel.luau` em uma máquina virtual Luau determinística com mocks completos do runtime Noctalia (`noctalia`, `ui`, `barWidget`, `panel`):
+- **Cenário 1 (APU Ryzen 5 5600GT):** Valida fallback de temperatura Borda quando Hotspot é nulo, soma unificada `VRAM + GTT`, teto de potência 65W e rótulos de hardware.
+- **Cenário 2 (dGPU RX 9060 XT):** Valida leitura de Hotspot, teto de 300W e exibição de VRAM física dedicada.
+- **Cenário 3 (Hardware Offline):** Valida ocultação do widget quando `hide_inactive = true` e desativação segura dos indicadores.
+- **Cenário 4 (Ajuste Otimista de Cor e Imunidade a Snapshots Obsoletos):** Valida atualização imediata do slider para 150%, retenção de comando em trânsito assíncrono, imunidade contra *snap-back* diante de polls com snapshots obsoletos e reconciliação limpa pós-hardware.
 
 ## 5. Evolução
 

@@ -248,6 +248,19 @@ GpuTelemetry read_gpu_telemetry(const std::filesystem::path& drm_root) {
         telem.vram_total_mib = static_cast<double>(*v_total) / (1024.0 * 1024.0);
     }
 
+    // GTT Info (bytes -> MiB)
+    if (auto g_used = read_file_number<uint64_t>(dev_path / "mem_info_gtt_used")) {
+        telem.gtt_used_mib = static_cast<double>(*g_used) / (1024.0 * 1024.0);
+    }
+    if (auto g_total = read_file_number<uint64_t>(dev_path / "mem_info_gtt_total")) {
+        telem.gtt_total_mib = static_cast<double>(*g_total) / (1024.0 * 1024.0);
+    }
+
+    if (telem.vram_total_mib.has_value() && *telem.vram_total_mib > 0.0 && *telem.vram_total_mib <= 2048.0 &&
+        telem.gtt_total_mib.has_value() && *telem.gtt_total_mib > *telem.vram_total_mib) {
+        telem.is_apu = true;
+    }
+
     // Clock (SCLK MHz)
     if (auto sclk_str = read_file_string(dev_path / "pp_dpm_sclk")) {
         telem.sclk_mhz = parse_sclk_mhz(*sclk_str);
@@ -306,6 +319,9 @@ std::string format_telemetry_text(const GpuTelemetry& t) {
     if (!t.pci_id.empty()) {
         ss << " (" << t.pci_id << ")";
     }
+    if (!t.card_name.empty()) {
+        ss << (t.is_apu ? " [APU]" : " [dGPU]");
+    }
     ss << "\n";
 
     ss << "GPU Usage:          ";
@@ -326,6 +342,16 @@ std::string format_telemetry_text(const GpuTelemetry& t) {
         ss << "\n";
     } else {
         ss << "N/A\n";
+    }
+
+    if (t.gtt_used_mib && t.gtt_total_mib) {
+        ss << "GTT Usage:          ";
+        ss << *t.gtt_used_mib << " MiB / " << *t.gtt_total_mib << " MiB";
+        if (*t.gtt_total_mib > 0) {
+            double pct = (*t.gtt_used_mib / *t.gtt_total_mib) * 100.0;
+            ss << " (" << pct << " %)";
+        }
+        ss << "\n";
     }
 
     ss << "Temperature (Edge): ";
@@ -351,6 +377,7 @@ std::string format_telemetry_json(const GpuTelemetry& t) {
     ss << "  \"card\": " << json_string(t.card_name) << ",\n";
     ss << "  \"pci_id\": " << json_string(t.pci_id) << ",\n";
     ss << "  \"device_id\": " << json_string(t.device_id) << ",\n";
+    ss << "  \"is_apu\": " << (t.is_apu ? "true" : "false") << ",\n";
 
     ss << "  \"gpu_busy_percent\": ";
     if (t.gpu_busy_percent) ss << *t.gpu_busy_percent;
@@ -369,6 +396,16 @@ std::string format_telemetry_json(const GpuTelemetry& t) {
 
     ss << "  \"vram_total_mib\": ";
     if (t.vram_total_mib) ss << *t.vram_total_mib;
+    else ss << "null";
+    ss << ",\n";
+
+    ss << "  \"gtt_used_mib\": ";
+    if (t.gtt_used_mib) ss << *t.gtt_used_mib;
+    else ss << "null";
+    ss << ",\n";
+
+    ss << "  \"gtt_total_mib\": ";
+    if (t.gtt_total_mib) ss << *t.gtt_total_mib;
     else ss << "null";
     ss << ",\n";
 
