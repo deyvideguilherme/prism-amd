@@ -141,6 +141,27 @@ noctalia msg plugins enable deyvideguilherme/prisma
 noctalia msg plugins list | grep prisma
 ```
 
+### Atalho Global no Niri (Alt+R) e Quick Tile
+
+Para acesso rápido à central de controle durante o uso do desktop ou partidas em tela cheia, configure o atalho `Alt+R` no compositor Niri (`~/.config/niri/cfg/keybinds.kdl`):
+
+```kdl
+binds {
+    Alt+R allow-when-locked=true { spawn "noctalia" "msg" "panel-toggle" "deyvideguilherme/prisma:panel"; }
+}
+```
+
+O plugin também registra um quick tile (`[[shortcut]]`) acessível na central de ações do Noctalia Shell (`Mod+S`), permitindo alternar a visibilidade do painel e visualizar o status do hardware e o perfil ativo.
+
+### Detecção Automática e Perfis por Jogo
+
+O serviço de segundo plano (`prisma_service.luau`) consulta periodicamente a janela em foco no Niri (`niri msg --json focused-window`) de forma assíncrona, associando o identificador do executável (`app_id`) a perfis de calibragem pré-configurados:
+
+- **Persistência de Regras:** As vinculações entre aplicativos e perfis são salvas em `~/.config/prisma/app_rules.json`.
+- **Transição Atômica:** Ao focar em um jogo mapeado (ex.: `cs2`), o estado atual de calibragem da área de trabalho é preservado em memória como `fallback_state` e o perfil vinculado é aplicado diretamente ao hardware.
+- **Restauração Automática:** Ao alternar para a área de trabalho ou para qualquer aplicativo sem regra vinculada, o serviço restaura automaticamente os parâmetros anteriores de saturação, contraste e brilho.
+- **Configuração Visual:** Na aba **Perfis**, o usuário pode habilitar ou desabilitar a troca automática, visualizar a janela em foco detectada pelo compositor e vincular o perfil desejado com um clique. Na aba **Tela & Cor**, um indicador informa quando um perfil automático está em execução.
+
 ## 6. Referência da CLI (prisma-ctl)
 
 O utilitário `prisma-ctl` gerencia parâmetros de hardware, consulta de sensores e persistência de perfis.

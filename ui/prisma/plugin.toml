@@ -36,6 +36,10 @@ entry = "prisma_service.luau"
 id = "widget"
 entry = "prisma_widget.luau"
 
+[[shortcut]]
+id = "shortcut"
+entry = "prisma_shortcut.luau"
+
 [[panel]]
 id = "panel"
 entry = "prisma_panel.luau"

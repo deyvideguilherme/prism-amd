@@ -1,10 +1,13 @@
 --!nonstrict
 -- Prisma Control Center - Interactive Desktop Panel
--- Visual control center featuring live hardware telemetry, DCN color calibration, and profile management.
--- Uses standard Noctalia native primitives (ui.box, ui.column, ui.row, ui.label, ui.button, ui.progress, ui.input, ui.scroll).
+-- Visual control center featuring live hardware telemetry, DCN color calibration,
+-- profile management, and automatic per-game profile switching.
+-- Uses standard Noctalia native primitives (ui.box, ui.column, ui.row, ui.label, ui.button, ui.progress, ui.select, ui.input, ui.scroll).
 
 local currentTab = "performance" -- "performance" | "color" | "profiles"
 local newProfileName = ""
+local selectedRuleProfile = "competitivo"
+local selectedRuleIndex = 0
 
 -- Cached local state to provide instant feedback before service roundtrips
 local localDevice = {
@@ -190,6 +193,22 @@ end
 
 local function colorView()
     local isEnabled = (localDevice.enabled == 1)
+    local elements = {}
+
+    -- Discrete banner when an automatic game profile is active
+    if statusData and type(statusData.activeAutoProfile) == "string" and statusData.activeAutoProfile ~= "" then
+        local appName = if type(statusData.focusedAppTitle) == "string" and statusData.focusedAppTitle ~= ""
+            then statusData.focusedAppTitle
+            else (if type(statusData.focusedAppId) == "string" then statusData.focusedAppId else "Jogo em foco")
+
+        table.insert(elements, ui.row({ align = "center", justify = "space_between" }, {
+            ui.row({ gap = 8, align = "center" }, {
+                ui.label({ text = "PERFIL AUTOMÁTICO ATIVO:", fontSize = 11, fontWeight = "bold", color = "primary" }),
+                ui.label({ text = statusData.activeAutoProfile, fontSize = 12, fontWeight = "bold", color = "on_surface" }),
+            }),
+            ui.label({ text = appName, fontSize = 11, color = "on_surface_variant" }),
+        }))
+    end
 
     -- 1. Master Enable Toggle Row
     local masterRow = ui.row({ align = "center", justify = "space_between" }, {
@@ -208,6 +227,7 @@ local function colorView()
             onClick = "onToggleMaster",
         }),
     })
+    table.insert(elements, masterRow)
 
     -- 2. Precision Parameter Block with Interactive Bar & Direct Input
     local function parameterBlock(keyId, title, subtitle, value, minVal, maxVal, defaultVal, onSelectValue, onSub1, onAdd1, onReset)
@@ -285,6 +305,7 @@ local function colorView()
         "onSaturationAdd1",
         "onSaturationReset"
     )
+    table.insert(elements, satBlock)
 
     local conBlock = parameterBlock(
         "contrast",
@@ -297,6 +318,7 @@ local function colorView()
         "onContrastAdd1",
         "onContrastReset"
     )
+    table.insert(elements, conBlock)
 
     local briBlock = parameterBlock(
         "brightness",
@@ -309,6 +331,7 @@ local function colorView()
         "onBrightnessAdd1",
         "onBrightnessReset"
     )
+    table.insert(elements, briBlock)
 
     -- 3. Presets Rápidos
     local presetsBlock = ui.column({ gap = 8, align = "stretch" }, {
@@ -348,28 +371,153 @@ local function colorView()
             }),
         }),
     })
+    table.insert(elements, presetsBlock)
 
-    return ui.column({ gap = 16, align = "stretch" }, {
-        masterRow,
-        satBlock,
-        conBlock,
-        briBlock,
-        presetsBlock,
-    })
+    return ui.column({ gap = 16, align = "stretch" }, elements)
 end
 
--- ── Tab 3: Perfis (Profiles Management) ──────────────────────────────────────
+-- ── Tab 3: Perfis (Profiles & Per-Game Automation) ───────────────────────────
 
 local function profilesView()
     local profiles = if statusData and statusData.profiles then statusData.profiles else {}
+    local autoSwitch = if statusData and statusData.autoSwitchEnabled ~= nil then statusData.autoSwitchEnabled else true
+    local focusedId = if statusData and statusData.focusedAppId then statusData.focusedAppId else ""
+    local focusedTitle = if statusData and statusData.focusedAppTitle then statusData.focusedAppTitle else focusedId
+    local activeAuto = if statusData and statusData.activeAutoProfile then statusData.activeAutoProfile else nil
 
-    -- Save Profile Block
+    -- 1. Game & Application Automation Section
+    local autoHeader = ui.row({ align = "center", justify = "space_between" }, {
+        ui.column({ gap = 2, flexGrow = 1 }, {
+            ui.label({ text = "AUTOMAÇÃO POR JOGO / APLICATIVO", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
+            ui.label({
+                text = "Aplica perfis de calibragem automaticamente ao focar em cada janela",
+                fontSize = 11,
+                color = "on_surface_variant",
+            }),
+        }),
+        ui.button({
+            text = if autoSwitch then "Troca Automática: ATIVADA" else "Troca Automática: DESATIVADA",
+            glyph = if autoSwitch then "check" else "x",
+            variant = if autoSwitch then "primary" else "outline",
+            onClick = "onToggleAutoSwitch",
+        }),
+    })
+
+    -- Focus detection indicator
+    local focusLabelText = if focusedId ~= ""
+        then (if focusedTitle ~= "" and focusedTitle ~= focusedId then `{focusedTitle} ({focusedId})` else focusedId)
+        else "Nenhuma janela detectada no momento"
+
+    local focusRow = ui.row({ align = "center", justify = "space_between" }, {
+        ui.column({ gap = 2, flexGrow = 1 }, {
+            ui.label({ text = "Janela em foco no Niri:", fontSize = 11, color = "on_surface_variant" }),
+            ui.label({
+                text = focusLabelText,
+                fontSize = 13,
+                fontWeight = "bold",
+                color = if focusedId ~= "" then "primary" else "on_surface_variant",
+            }),
+        }),
+    })
+
+    -- Build profile choices: built-in presets + user profiles
+    local profileOptions = { "competitivo", "padrao", "cinema", "monocromatico" }
+    for _, p in ipairs(profiles) do
+        if p.name and table.find(profileOptions, p.name) == nil then
+            table.insert(profileOptions, p.name)
+        end
+    end
+
+    if selectedRuleIndex < 0 or selectedRuleIndex >= #profileOptions then
+        selectedRuleIndex = 0
+    end
+    selectedRuleProfile = profileOptions[selectedRuleIndex + 1] or "competitivo"
+
+    local linkControlsRow = ui.row({ gap = 8, align = "center" }, {
+        ui.select({
+            key = `rule_profile_select_{#profileOptions}`,
+            options = profileOptions,
+            selectedIndex = selectedRuleIndex,
+            onChange = "onSelectRuleProfile",
+            flexGrow = 1,
+        }),
+        ui.button({
+            text = "Vincular Perfil a este Jogo",
+            glyph = "link",
+            variant = "primary",
+            enabled = (focusedId ~= ""),
+            onClick = "onLinkFocusedApp",
+        }),
+    })
+
+    -- Linked rules list
+    local ruleRows = {}
+    local appRules = if statusData and type(statusData.appRules) == "table" then statusData.appRules else {}
+    local ruleCount = 0
+
+    for appId, rule in pairs(appRules) do
+        if type(rule) == "table" then
+            ruleCount += 1
+            local prof = rule.profile or "competitivo"
+            local title = if type(rule.title) == "string" and rule.title ~= "" then rule.title else appId
+            local isCurrent = (focusedId == appId)
+            local isCurrentlyActive = (activeAuto == prof and isCurrent)
+
+            local onDeleteRule = function()
+                sendCommand({ action = "unlink_app_rule", app_id = appId })
+            end
+
+            local titleChildren = {
+                ui.label({ text = title, fontSize = 13, fontWeight = "bold" }),
+            }
+            if isCurrentlyActive then
+                table.insert(titleChildren, ui.label({ text = "[ATIVO]", fontSize = 10, fontWeight = "bold", color = "primary" }))
+            elseif isCurrent then
+                table.insert(titleChildren, ui.label({ text = "[EM FOCO]", fontSize = 10, color = "secondary" }))
+            end
+
+            table.insert(ruleRows, ui.row({ align = "center", justify = "space_between" }, {
+                ui.column({ gap = 2, flexGrow = 1 }, {
+                    ui.row({ gap = 6, align = "center" }, titleChildren),
+                    ui.label({
+                        text = `ID: {appId} -> Perfil: {prof}`,
+                        fontSize = 11,
+                        color = "on_surface_variant",
+                    }),
+                }),
+                ui.button({
+                    glyph = "trash",
+                    variant = "destructive",
+                    tooltip = `Remover vínculo de '{title}'`,
+                    onClick = onDeleteRule,
+                }),
+            }))
+        end
+    end
+
+    if ruleCount == 0 then
+        table.insert(ruleRows, ui.label({
+            text = "Nenhum aplicativo ou jogo vinculado ainda.",
+            color = "on_surface_variant",
+            fontSize = 12,
+        }))
+    end
+
+    local automationBlock = ui.column({ gap = 10, align = "stretch" }, {
+        autoHeader,
+        focusRow,
+        linkControlsRow,
+        ui.label({ text = "REGRAS VINCULADAS", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
+        ui.column({ gap = 8, align = "stretch" }, ruleRows),
+    })
+
+    -- 2. Save Profile Block
     local saveBlock = ui.column({ gap = 8, align = "stretch" }, {
         ui.label({ text = "SALVAR ESTADO ATUAL", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
         ui.row({ gap = 8, align = "center" }, {
             ui.input({
                 key = "profile_input",
-                placeholder = "Nome do perfil (ex: jogos, filmes)",
+                placeholder = "Nome do perfil personalizado (ex: cs2-custom, cinema)",
                 value = newProfileName,
                 flexGrow = 1,
                 onChange = "onProfileNameChange",
@@ -385,11 +533,11 @@ local function profilesView()
         }),
     })
 
-    -- Profile List Items
+    -- 3. Profile List Items
     local profileRows = {}
     if #profiles == 0 then
         table.insert(profileRows, ui.label({
-            text = "Nenhum perfil salvo ainda",
+            text = "Nenhum perfil personalizado salvo ainda",
             color = "on_surface_variant",
             fontSize = 12,
         }))
@@ -436,11 +584,11 @@ local function profilesView()
     end
 
     local listBlock = ui.column({ gap = 8, align = "stretch" }, {
-        ui.label({ text = "PERFIS SALVOS", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
+        ui.label({ text = "PERFIS PERSONALIZADOS SALVOS", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
         ui.column({ gap = 10, align = "stretch" }, profileRows),
     })
 
-    -- Profile Actions Footer
+    -- 4. Profile Actions Footer
     local actionsRow = ui.row({ align = "center", justify = "space_between" }, {
         ui.button({
             glyph = "refresh",
@@ -457,6 +605,7 @@ local function profilesView()
     })
 
     return ui.column({ gap = 16, align = "stretch" }, {
+        automationBlock,
         saveBlock,
         listBlock,
         actionsRow,
@@ -681,6 +830,31 @@ end
 
 function onResetDefaultsClicked()
     sendCommand({ action = "profile_reset" })
+end
+
+function onToggleAutoSwitch()
+    sendCommand({ action = "toggle_auto_switch" })
+end
+
+function onSelectRuleProfile(idx, text)
+    selectedRuleIndex = tonumber(idx) or 0
+    if text and text ~= "" then
+        selectedRuleProfile = text
+    end
+    render()
+end
+
+function onLinkFocusedApp()
+    local focusedId = if statusData and statusData.focusedAppId then statusData.focusedAppId else ""
+    local focusedTitle = if statusData and statusData.focusedAppTitle then statusData.focusedAppTitle else focusedId
+    if focusedId ~= "" then
+        sendCommand({
+            action = "link_app_rule",
+            app_id = focusedId,
+            title = focusedTitle,
+            profile = selectedRuleProfile,
+        })
+    end
 end
 
 -- Subscribe to telemetry/state updates
