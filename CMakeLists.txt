@@ -138,12 +138,33 @@ if(PRISMA_BUILD_LEGACY_VULKAN)
     )
 endif()
 
+find_program(NOCTALIA_BIN noctalia)
 set(NOCTALIA_PLUGIN_DIR "$ENV{HOME}/.local/state/noctalia/plugins/materialized/deyvideguilherme/prisma")
-add_custom_target(install-ui
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/ui/prisma" "${NOCTALIA_PLUGIN_DIR}"
-    VERBATIM
-)
-add_custom_target(uninstall-ui
-    COMMAND ${CMAKE_COMMAND} -E rm -rf "${NOCTALIA_PLUGIN_DIR}"
-    VERBATIM
-)
+
+if(NOCTALIA_BIN)
+    add_custom_target(install-ui
+        COMMAND "${NOCTALIA_BIN}" msg plugins source add prisma path "${CMAKE_CURRENT_SOURCE_DIR}/ui"
+        COMMAND "${NOCTALIA_BIN}" msg plugins update prisma
+        COMMAND "${NOCTALIA_BIN}" msg plugins enable deyvideguilherme/prisma
+        VERBATIM
+        COMMENT "Registering and enabling Prisma plugin in Noctalia Shell"
+    )
+    add_custom_target(uninstall-ui
+        COMMAND "${NOCTALIA_BIN}" msg plugins disable deyvideguilherme/prisma
+        COMMAND "${NOCTALIA_BIN}" msg plugins source remove prisma
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "${NOCTALIA_PLUGIN_DIR}"
+        VERBATIM
+        COMMENT "Disabling and removing Prisma plugin from Noctalia Shell"
+    )
+else()
+    add_custom_target(install-ui
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/ui/prisma" "${NOCTALIA_PLUGIN_DIR}"
+        VERBATIM
+        COMMENT "Fallback: Noctalia CLI not found; copied plugin files to materialized directory"
+    )
+    add_custom_target(uninstall-ui
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "${NOCTALIA_PLUGIN_DIR}"
+        VERBATIM
+        COMMENT "Fallback: Removed materialized plugin directory"
+    )
+endif()

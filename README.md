@@ -152,30 +152,43 @@ sudo dkms install -m chroma-amd -v 1.0.0
 
 ## 5. Instalação Manual no Noctalia Shell
 
-Se você não utilizou o pacote Arch Linux, o plugin pode ser instalado via CMake ou registrado como fonte local:
+Se você não utilizou o pacote Arch Linux, o plugin pode ser instalado via CMake ou registrado como fonte local diretamente pela CLI do Noctalia:
 
-### Opção A: Instalação Materializada via CMake (Recomendada)
+### Opção A: Instalação via CMake (Recomendada)
+
+Com o binário `prisma-ctl` instalado no seu `PATH`, execute:
 
 ```bash
 cmake --build build --target install-ui
-noctalia msg plugins update deyvideguilherme
-noctalia msg plugins enable deyvideguilherme/prisma
 ```
 
-O plugin é instalado em `~/.local/state/noctalia/plugins/materialized/deyvideguilherme/prisma`.
+Esse comando registra o diretório `ui/` do Prisma como uma fonte local no Noctalia (`noctalia msg plugins source add prisma path <caminho>/ui`), sincroniza o catálogo com `noctalia msg plugins update prisma` e ativa o plugin com `noctalia msg plugins enable deyvideguilherme/prisma`.
 
-### Opção B: Fonte Local para Desenvolvimento
+Para remover a integração:
+```bash
+cmake --build build --target uninstall-ui
+```
+
+### Opção B: Registro Manual de Fonte Local
+
+Você também pode registrar e gerenciar o plugin diretamente pelos comandos de mensageria IPC do Noctalia:
 
 ```bash
-noctalia msg plugins source add deyvideguilherme path $(pwd)/ui
-noctalia msg plugins update deyvideguilherme
+noctalia msg plugins source add prisma path $(pwd)/ui
+noctalia msg plugins update prisma
 noctalia msg plugins enable deyvideguilherme/prisma
 ```
 
 ### Verificação do Status do Plugin
 
+Confirme que o plugin foi reconhecido e está ativo:
+
 ```bash
 noctalia msg plugins list | grep prisma
+```
+Saída esperada:
+```
+deyvideguilherme/prisma [prisma] 1.0.0 enabled requires prisma-ctl
 ```
 
 ## 6. Referência da CLI (prisma-ctl)
