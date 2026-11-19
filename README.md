@@ -166,6 +166,53 @@ cat /sys/kernel/chroma_amd/brightness
 cat /sys/kernel/chroma_amd/enabled
 ```
 
+## Plugin Noctalia Shell (Prisma Control Center)
+
+A interface gráfica do Prisma é fornecida como um plugin nativo para o [Noctalia Shell](https://noctalia.dev) (`plugin.toml` e scripts Luau). Ela oferece um widget na barra do sistema com leitura de temperatura/carga e um painel interativo com três abas:
+
+1. **Desempenho:** Cartões de telemetria em tempo real com histórico visual (carga da GPU, clock SCLK, temperatura Hotspot e Edge, consumo elétrico e alocação de VRAM).
+2. **Tela & Cor:** Chave mestre de injeção em hardware, sliders de alta precisão com ajuste fino (-5/+5) e restauração para Saturação (`0..400%`), Contraste (`10..300%`) e Brilho (`-100..100%`), além de presets rápidos (Padrão, Competitivo, Cinema e Monocromático).
+3. **Perfis:** Listagem de perfis salvos em `~/.config/prisma/profiles/`, criação de novos perfis a partir do estado atual, aplicação direta com 1 clique, exclusão e redefinição aos padrões.
+
+### Instalação
+
+```bash
+# Compilar prisma-ctl e instalar localmente
+cmake -B build
+cmake --build build --target install-local
+
+# Instalar o plugin do Noctalia
+cmake --build build --target install-ui
+```
+
+O target `install-ui` copia o diretório `ui/prisma-panel/` para `~/.local/state/noctalia/plugins/materialized/deyvideguilherme/prisma`.
+
+Caso o Noctalia execute em ambiente com isolamento de binários do usuário, crie um symlink do `prisma-ctl` no caminho de sistema para validação automática de dependências:
+
+```bash
+sudo ln -sf ~/.local/bin/prisma-ctl /usr/local/bin/prisma-ctl
+```
+
+### Ativação
+
+Para ativar o plugin na instância em execução do Noctalia Shell:
+
+```bash
+noctalia msg plugins enable deyvideguilherme/prisma
+```
+
+Para verificar o status do plugin instalado:
+
+```bash
+noctalia msg plugins list | grep prisma
+```
+
+Para remover o plugin:
+
+```bash
+cmake --build build --target uninstall-ui
+```
+
 ## Vulkan Implicit Layer (Opcional, por aplicação)
 
 Caso deseje aplicar saturação pontual a um único jogo Vulkan sem alterar a exibição de todo o monitor:

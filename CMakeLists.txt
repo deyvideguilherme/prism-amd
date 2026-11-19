@@ -220,3 +220,23 @@ add_custom_target(uninstall-local
     COMMENT "Removing local installation of prisma binaries, libraries and manifest"
     VERBATIM
 )
+
+# ==============================================================================
+# 5. Noctalia Shell Plugin (Prisma Control Center)
+# ==============================================================================
+set(NOCTALIA_PLUGIN_DIR "$ENV{HOME}/.local/state/noctalia/plugins/materialized/deyvideguilherme/prisma")
+
+# Target: install-ui
+add_custom_target(install-ui
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${NOCTALIA_PLUGIN_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/ui/prisma-panel" "${NOCTALIA_PLUGIN_DIR}"
+    COMMENT "Installing Prisma Control Center plugin to ${NOCTALIA_PLUGIN_DIR}"
+    VERBATIM
+)
+
+# Target: uninstall-ui
+add_custom_target(uninstall-ui
+    COMMAND ${CMAKE_COMMAND} -E remove_directory "${NOCTALIA_PLUGIN_DIR}"
+    COMMENT "Removing Prisma Control Center plugin from ${NOCTALIA_PLUGIN_DIR}"
+    VERBATIM
+)
