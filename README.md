@@ -8,11 +8,11 @@ O Prisma Control Center (`prism-amd`) ajusta a saída de vídeo de GPUs AMD (`am
 
 A suíte é composta por três componentes:
 
-- **Módulo de Kernel (`kernel/chroma_amd.ko`).** Descobre GPUs AMD com suporte a CTM ao observar `drm_atomic_helper_commit`. Aplica a matriz Rec.709 em uma transação própria validada pelo DRM e pelo AMDGPU. Expõe a configuração em `/dev/chroma_amd` e atributos de leitura em `/sys/kernel/chroma_amd/`.
+- **Módulo de Kernel (`kernel/chroma_amd.ko`).** Descobre GPUs AMD com suporte a CTM através de varredura proativa de barramento PCI (`chroma_scan_pci`) e observação de commits DRM (`drm_atomic_helper_commit`). Aplica a matriz Rec.709 em uma transação própria validada pelo DRM e pelo AMDGPU, com fallback de modeset para DCN 2.x e adoção de matriz identidade do compositor. Expõe a configuração em `/dev/chroma_amd` e atributos de leitura em `/sys/kernel/chroma_amd/`.
 - **Utilitário CLI (`prisma-ctl`):** Utilitário de linha de comando em C++20 para consulta de telemetria do driver `amdgpu` e `hwmon`, ajuste atômico de parâmetros em `/dev/chroma_amd` e gerenciamento de perfis em `~/.config/prisma/profiles/`.
 - **Plugin Noctalia Shell (`ui/prisma`):** Plugin nativo para o ambiente Noctalia Shell no compositor Niri (Wayland). Oferece um widget de barra com monitoramento em tempo real e uma central de controle visual com abas de **Desempenho**, **Tela & Cor** e **Perfis**.
 
-## 2. Requisitos de Sistema
+## 2. Requisitos de Sistema e Compatibilidade de Hardware
 
 - **CLI.** Linux com compilador C++20, CMake 3.20 ou mais recente e Make ou Ninja.
 - **Módulo.** Headers do kernel alvo, Kbuild, suporte a Kprobes, IRQ work e ao acesso a argumentos da arquitetura, DRM/KMS e AMDGPU com propriedade CTM nas saídas de interesse.
@@ -20,6 +20,15 @@ A suíte é composta por três componentes:
 - **Interface.** Noctalia Shell com suporte à API 36 do plugin.
 
 O módulo foi compilado para CachyOS x86_64 **6.18.60-2-cachyos-lts** e **7.3.4-1-cachyos**. A integração com o dispositivo de caractere foi executada nesses kernels em QEMU. O [relatório de auditoria](AUDIT_REPORT.md) registra o alcance dos testes de DRM e hardware.
+
+### Matriz de Compatibilidade: dGPUs e APUs
+
+O Prisma suporta nativamente tanto placas dedicadas quanto processadores com gráficos integrados AMD:
+
+| Categoria | Arquitetura / DCN | Exemplo de Hardware | Particularidades de Hardware & Suporte no Prisma |
+| :--- | :--- | :--- | :--- |
+| **dGPU** (Placa Dedicada) | RDNA 2 / 3 / 4 (DCN 3.x / DCN 4.x) | AMD Radeon RX 9060 XT, RX 7000, RX 6000 | Monitoramento independente de Borda e Hotspot de silício; teto dinâmico de potência de 300W+; alocação exclusiva de VRAM física de alta velocidade. |
+| **APU** (Gráficos Integrados) | Vega / Cezanne / Renoir (DCN 2.1) | AMD Ryzen 5 5600GT, 5700G, 4600G | Fallback automático para sensor de encapsulamento (Edge) quando Hotspot não existe; teto dinâmico de 65W (PPT); exibição unificada de memória compartilhada `VRAM + GTT`; e fallback de `allow_modeset = true` no kernel durante a transição da matriz CTM. |
 
 ## 3. Compilação e Instalação
 
@@ -297,9 +306,9 @@ prisma-ctl --version
 
 A calibração destina-se a SDR Rec.709. O Prisma usa a propriedade CTM de cada CRTC elegível. As propriedades de gamma e degamma permanecem sob controle do compositor. Com HDR ou um perfil ICC ativo, desative a calibração para evitar uma transformação SDR no pipeline.
 
-A descoberta de uma GPU requer que ela passe pelo helper DRM observado depois que o módulo é carregado. Em uma sessão ociosa, a primeira descoberta pode depender do próximo commit do compositor. Em GPUs descobertas, a CLI confirma que o módulo aceitou a configuração. A transação de hardware ocorre separadamente, sem reiniciar a sessão. O driver pode rejeitá-la. Consulte o log do kernel para erros de commit.
+A descoberta de adaptadores gráficos é híbrida e proativa: o módulo executa uma varredura direta no barramento PCI no carregamento (`chroma_scan_pci`) e mantém a observação contínua de novos commits via kprobe (`drm_atomic_helper_commit`). Em GPUs descobertas, a CLI confirma que o módulo aceitou a configuração. A transação de hardware ocorre separadamente no kernel, sem reiniciar a sessão gráfica.
 
-Se o compositor já tiver uma CTM, a calibração cede a saída ao compositor. O módulo remove apenas o blob exato que instalou com sucesso. A desativação também preserva uma matriz mais recente definida pelo compositor. O comportamento vale por saída e por GPU.
+Ao avaliar saídas elegíveis, o módulo inspeciona os 9 coeficientes em ponto fixo DRM S31.32 da CTM existente. Se o compositor tiver configurado uma matriz identidade padrão (`1.0` nas diagonais e `0` nos demais elementos), o Prisma assume o CRTC com segurança. Se o compositor já tiver aplicado uma matriz externa de cor personalizada (como filtros de luz noturna Night Light ou perfis ICC), a calibração cede a saída ao compositor e não interfere. O módulo remove apenas o blob exato que instalou com sucesso. O comportamento vale por saída e por GPU.
 
 ## 8. Sincronização e Automação de Versões (scripts/bump-version.sh)
 
