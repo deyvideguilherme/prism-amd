@@ -10,9 +10,12 @@ struct GpuTelemetry {
     std::string card_name;                   // e.g. "card1"
     std::string pci_id;                      // e.g. "0000:2d:00.0"
     std::string device_id;                   // e.g. "0x73df"
+    bool is_apu = false;
     std::optional<int> gpu_busy_percent;     // 0..100 %
     std::optional<double> vram_used_mib;     // MiB
     std::optional<double> vram_total_mib;    // MiB
+    std::optional<double> gtt_used_mib;      // MiB
+    std::optional<double> gtt_total_mib;     // MiB
     std::optional<double> temp_edge_c;       // °C
     std::optional<double> temp_junction_c;   // °C (Hotspot)
     std::optional<double> power_watts;       // W

@@ -167,6 +167,9 @@ void test_telemetry_parser() {
     GpuTelemetry telem = read_gpu_telemetry(mock_root);
 
     assert(telem.card_name == "card1");
+    assert(!telem.is_apu);
+    assert(!telem.gtt_total_mib.has_value());
+    assert(!telem.gtt_used_mib.has_value());
     assert(telem.gpu_busy_percent.has_value() && *telem.gpu_busy_percent == 42);
     assert(telem.sclk_mhz.has_value() && *telem.sclk_mhz == 2100);
     assert(telem.vram_total_mib.has_value() && std::abs(*telem.vram_total_mib - 8192.0) < 0.1);
@@ -175,9 +178,75 @@ void test_telemetry_parser() {
     assert(telem.temp_junction_c.has_value() && std::abs(*telem.temp_junction_c - 68.5) < 0.1);
     assert(telem.power_watts.has_value() && std::abs(*telem.power_watts - 85.5) < 0.1);
 
+    std::string text_dgpu = format_telemetry_text(telem);
+    assert(text_dgpu.find("card1 [dGPU]") != std::string::npos);
+    assert(text_dgpu.find("GTT Usage:") == std::string::npos);
+
     std::string json = format_telemetry_json(telem);
+    assert(json.find("\"is_apu\": false") != std::string::npos);
     assert(json.find("\"gpu_busy_percent\": 42") != std::string::npos);
     assert(json.find("\"sclk_mhz\": 2100") != std::string::npos);
+    assert(json.find("\"gtt_used_mib\": null") != std::string::npos);
+    assert(json.find("\"gtt_total_mib\": null") != std::string::npos);
+
+    // Case dGPU with GTT present (e.g. 8192 MiB VRAM + 16384 MiB GTT) -> must remain is_apu == false
+    {
+        std::ofstream(amd_dev / "mem_info_gtt_total") << "17179869184\n"; // 16384 MiB
+        std::ofstream(amd_dev / "mem_info_gtt_used") << "4294967296\n";   // 4096 MiB
+        GpuTelemetry telem_dgpu_gtt = read_gpu_telemetry(mock_root);
+        assert(!telem_dgpu_gtt.is_apu);
+        assert(telem_dgpu_gtt.gtt_total_mib.has_value() && std::abs(*telem_dgpu_gtt.gtt_total_mib - 16384.0) < 0.1);
+        assert(telem_dgpu_gtt.gtt_used_mib.has_value() && std::abs(*telem_dgpu_gtt.gtt_used_mib - 4096.0) < 0.1);
+
+        std::string text_dgpu_gtt = format_telemetry_text(telem_dgpu_gtt);
+        assert(text_dgpu_gtt.find("card1 [dGPU]") != std::string::npos);
+        assert(text_dgpu_gtt.find("GTT Usage:          4096.0 MiB / 16384.0 MiB (25.0 %)") != std::string::npos);
+
+        std::string json_dgpu_gtt = format_telemetry_json(telem_dgpu_gtt);
+        assert(json_dgpu_gtt.find("\"is_apu\": false") != std::string::npos);
+        assert(json_dgpu_gtt.find("\"gtt_used_mib\": 4096.0") != std::string::npos);
+        assert(json_dgpu_gtt.find("\"gtt_total_mib\": 16384.0") != std::string::npos);
+    }
+
+    // Case APU simulating Ryzen 5 5600GT (VRAM: 512 MiB, GTT: 8192 MiB, edge temp only)
+    {
+        TemporaryDirectory apu_fixture;
+        const auto& apu_root = apu_fixture.path;
+        std::filesystem::path apu_dev = apu_root / "card1" / "device";
+        std::filesystem::create_directories(apu_dev);
+        std::ofstream(apu_dev / "vendor") << "0x1002\n";
+        std::ofstream(apu_dev / "mem_info_vram_total") << "536870912\n"; // 512 MiB
+        std::ofstream(apu_dev / "mem_info_vram_used") << "506462208\n";  // 483 MiB
+        std::ofstream(apu_dev / "mem_info_gtt_total") << "8589934592\n"; // 8192 MiB
+        std::ofstream(apu_dev / "mem_info_gtt_used") << "1073741824\n";  // 1024 MiB
+
+        std::filesystem::path apu_hwmon = apu_dev / "hwmon" / "hwmon0";
+        std::filesystem::create_directories(apu_hwmon);
+        std::ofstream(apu_hwmon / "temp1_label") << "edge\n";
+        std::ofstream(apu_hwmon / "temp1_input") << "33500\n"; // 33.5 °C
+
+        GpuTelemetry apu_telem = read_gpu_telemetry(apu_root);
+        assert(apu_telem.is_apu);
+        assert(apu_telem.vram_total_mib.has_value() && std::abs(*apu_telem.vram_total_mib - 512.0) < 0.1);
+        assert(apu_telem.vram_used_mib.has_value() && std::abs(*apu_telem.vram_used_mib - 483.0) < 0.1);
+        assert(apu_telem.gtt_total_mib.has_value() && std::abs(*apu_telem.gtt_total_mib - 8192.0) < 0.1);
+        assert(apu_telem.gtt_used_mib.has_value() && std::abs(*apu_telem.gtt_used_mib - 1024.0) < 0.1);
+        assert(apu_telem.temp_edge_c.has_value() && std::abs(*apu_telem.temp_edge_c - 33.5) < 0.1);
+        assert(!apu_telem.temp_junction_c.has_value());
+
+        std::string apu_text = format_telemetry_text(apu_telem);
+        assert(apu_text.find("card1 [APU]") != std::string::npos);
+        assert(apu_text.find("GTT Usage:          1024.0 MiB / 8192.0 MiB (12.5 %)") != std::string::npos);
+
+        std::string apu_json = format_telemetry_json(apu_telem);
+        assert(apu_json.find("\"is_apu\": true") != std::string::npos);
+        assert(apu_json.find("\"vram_total_mib\": 512.0") != std::string::npos);
+        assert(apu_json.find("\"vram_used_mib\": 483.0") != std::string::npos);
+        assert(apu_json.find("\"gtt_total_mib\": 8192.0") != std::string::npos);
+        assert(apu_json.find("\"gtt_used_mib\": 1024.0") != std::string::npos);
+        assert(apu_json.find("\"temp_edge_c\": 33.5") != std::string::npos);
+        assert(apu_json.find("\"temp_junction_c\": null") != std::string::npos);
+    }
 
     const auto second_amd = mock_root / "card2" / "device";
     const auto connected = mock_root / "card2-DP-1";
@@ -187,7 +256,9 @@ void test_telemetry_parser() {
     std::ofstream(second_amd / "mem_info_vram_total") << "-1\n";
     std::ofstream(connected / "status") << "connected\n";
     assert(find_amd_gpu_path(mock_root) == second_amd);
-    assert(!read_gpu_telemetry(mock_root).vram_total_mib);
+    auto telem_invalid = read_gpu_telemetry(mock_root);
+    assert(!telem_invalid.vram_total_mib);
+    assert(!telem_invalid.is_apu);
     std::filesystem::remove(connected / "status");
     assert(find_amd_gpu_path(mock_root) == amd_dev);
 

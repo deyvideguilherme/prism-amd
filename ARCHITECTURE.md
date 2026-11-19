@@ -93,10 +93,13 @@ O comando `prisma-ctl status --json` emite um objeto JSON no stdout com a seguin
     "card": "card1",
     "pci_id": "0000:2d:00.0",
     "device_id": "1002:7590",
+    "is_apu": false,
     "gpu_busy_percent": 7,
     "sclk_mhz": 964,
     "vram_used_mib": 1304.5,
     "vram_total_mib": 16304.0,
+    "gtt_used_mib": 412.0,
+    "gtt_total_mib": 16000.0,
     "temp_edge_c": 41.0,
     "temp_junction_c": 43.0,
     "power_watts": 22.0
@@ -122,10 +125,13 @@ O comando `prisma-ctl status --json` emite um objeto JSON no stdout com a seguin
 | `card` | String \| null | `"card0"`, `"card1"` | Nome do nó do dispositivo no DRM (`/sys/class/drm/`). |
 | `pci_id` | String \| null | `"0000:2d:00.0"` | Identificador do slot PCI no barramento do sistema. |
 | `device_id` | String \| null | `"1002:7590"` | Identificador de fornecedor e dispositivo PCI da GPU AMD. |
+| `is_apu` | Booleano | `true` ou `false` | Indica se o hardware é uma APU (GPU integrada com memória compartilhada). |
 | `gpu_busy_percent` | Inteiro \| null | `0` a `100` | Porcentagem instantânea de utilização dos compute engines da GPU. |
 | `sclk_mhz` | Inteiro \| null | Inteiro em MHz | Frequência de clock ativa do chip gráfico (extraída de `pp_dpm_sclk`). |
 | `vram_used_mib` | Float \| null | Flutuante (MiB) | Quantidade de memória VRAM atualmente alocada pelo driver. |
 | `vram_total_mib` | Float \| null | Flutuante (MiB) | Capacidade total de memória VRAM física disponível na GPU. |
+| `gtt_used_mib` | Float \| null | Flutuante (MiB) | Quantidade de memória do sistema (GTT) atualmente alocada para gráficos. |
+| `gtt_total_mib` | Float \| null | Flutuante (MiB) | Capacidade total de memória do sistema alocável para a GPU via GTT. |
 | `temp_edge_c` | Float \| null | Flutuante (°C) | Temperatura do sensor de borda (`edge`) do encapsulamento da GPU. |
 | `temp_junction_c` | Float \| null | Flutuante (°C) | Temperatura do ponto mais quente da matriz de silício (`junction` / Hotspot). |
 | `power_watts` | Float \| null | Flutuante (W) | Consumo elétrico instantâneo em Watts reportado pelo sensor do regulador. |
