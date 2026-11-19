@@ -1,19 +1,19 @@
 {
   "name": "Prisma Control Center",
-  "description": "Central de controle visual de cor em hardware e telemetria para GPUs AMD no Noctalia Shell.",
+  "description": "Painel de controle visual de cores e monitoramento para placas de vídeo AMD no Noctalia Shell.",
   "settings": {
     "bar_metric": {
       "label": "Métrica da Barra",
       "description": "Qual sensor exibir no indicador da barra",
       "options": {
         "hotspot": "Temperatura Hotspot (°C)",
-        "edge": "Temperatura Edge (°C)",
+        "edge": "Temperatura da Borda (°C)",
         "gpu_busy": "Carga da GPU (%)"
       }
     },
     "hide_inactive": {
       "label": "Ocultar se inativo",
-      "description": "Ocultar o widget da barra quando o módulo chroma_amd não estiver carregado"
+      "description": "Ocultar o widget da barra quando o hardware não estiver disponível"
     }
   }
 }

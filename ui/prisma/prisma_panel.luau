@@ -77,7 +77,7 @@ local function performanceView()
     local tempBlock = ui.column({ gap = 4, align = "stretch" }, {
         ui.row({ align = "center", justify = "space_between" }, {
             ui.label({ text = "TEMPERATURA", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
-            ui.label({ text = `Edge: {tempEdge}°C`, fontSize = 12, color = "on_surface_variant" }),
+            ui.label({ text = `Borda: {tempEdge}°C`, fontSize = 12, color = "on_surface_variant" }),
         }),
         ui.row({ align = "baseline", gap = 6 }, {
             ui.label({
@@ -86,7 +86,7 @@ local function performanceView()
                 fontWeight = "bold",
                 color = if tempJunc > 85 then "error" else "secondary",
             }),
-            ui.label({ text = "Sensor Hotspot / Junction", fontSize = 11, color = "on_surface_variant" }),
+            ui.label({ text = "Temperatura interna máxima da GPU", fontSize = 11, color = "on_surface_variant" }),
         }),
         ui.progress({
             height = 8,
@@ -100,7 +100,6 @@ local function performanceView()
     local powerBlock = ui.column({ gap = 4, align = "stretch" }, {
         ui.row({ align = "center", justify = "space_between" }, {
             ui.label({ text = "CONSUMO DE ENERGIA", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
-            ui.label({ text = "hwmon", fontSize = 12, color = "on_surface_variant" }),
         }),
         ui.row({ align = "baseline", gap = 6 }, {
             ui.label({ text = `{powerW} W`, fontSize = 22, fontWeight = "bold", color = "on_surface" }),
@@ -195,15 +194,15 @@ local function colorView()
     -- 1. Master Enable Toggle Row
     local masterRow = ui.row({ align = "center", justify = "space_between" }, {
         ui.column({ gap = 2, flexGrow = 1 }, {
-            ui.label({ text = "Injeção de Hardware CTM & GAMMA_LUT", fontSize = 14, fontWeight = "bold" }),
+            ui.label({ text = "Calibragem de Cor em Hardware", fontSize = 14, fontWeight = "bold" }),
             ui.label({
-                text = "Aplica calibragem de saturação, contraste e brilho direto no display controller",
+                text = "Ajusta saturação, contraste e brilho diretamente na saída de vídeo da placa",
                 fontSize = 11,
                 color = "on_surface_variant",
             }),
         }),
         ui.button({
-            text = if isEnabled then "Injeção: ATIVADA" else "Injeção: DESATIVADA",
+            text = if isEnabled then "Calibragem: ATIVADA" else "Calibragem: DESATIVADA",
             glyph = if isEnabled then "check" else "x",
             variant = if isEnabled then "primary" else "outline",
             onClick = "onToggleMaster",
@@ -278,7 +277,7 @@ local function colorView()
     local satBlock = parameterBlock(
         "saturation",
         "Saturação",
-        "Digital Vibrance em hardware Rec.709 (0..400%)",
+        "Intensidade e vivacidade das cores na tela (0..400%)",
         localDevice.saturation,
         0, 400, 100,
         function(val) localDevice.saturation = clamp(val, 0, 400) end,
@@ -290,7 +289,7 @@ local function colorView()
     local conBlock = parameterBlock(
         "contrast",
         "Contraste",
-        "Fator de contraste linear da matriz CTM (10..300%)",
+        "Diferença entre tons claros e escuros (10..300%)",
         localDevice.contrast,
         10, 300, 100,
         function(val) localDevice.contrast = clamp(val, 10, 300) end,
@@ -302,7 +301,7 @@ local function colorView()
     local briBlock = parameterBlock(
         "brightness",
         "Brilho",
-        "Offset na curva GAMMA_LUT do hardware (-100..100%)",
+        "Nível geral de luminosidade da imagem (-100..100%)",
         localDevice.brightness,
         -100, 100, 0,
         function(val) localDevice.brightness = clamp(val, -100, 100) end,
@@ -370,7 +369,7 @@ local function profilesView()
         ui.row({ gap = 8, align = "center" }, {
             ui.input({
                 key = "profile_input",
-                placeholder = "Nome do perfil (ex: gaming, cinema)",
+                placeholder = "Nome do perfil (ex: jogos, filmes)",
                 value = newProfileName,
                 flexGrow = 1,
                 onChange = "onProfileNameChange",
@@ -390,7 +389,7 @@ local function profilesView()
     local profileRows = {}
     if #profiles == 0 then
         table.insert(profileRows, ui.label({
-            text = "Nenhum perfil salvo encontrado em ~/.config/prisma/profiles/",
+            text = "Nenhum perfil salvo ainda",
             color = "on_surface_variant",
             fontSize = 12,
         }))
@@ -450,7 +449,7 @@ local function profilesView()
             onClick = "onRefreshProfilesClicked",
         }),
         ui.button({
-            text = "Redefinir Padrões de Fábrica",
+            text = "Restaurar Padrões",
             glyph = "rotate",
             variant = "destructive",
             onClick = "onResetDefaultsClicked",

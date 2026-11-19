@@ -17,7 +17,7 @@ local function updateDisplay()
         barWidget.setGlyph("palette")
         barWidget.setGlyphColor("on_surface_variant")
         barWidget.setText("")
-        barWidget.setTooltip("Prisma Control Center\nMódulo chroma_amd não carregado ou permissão negada")
+        barWidget.setTooltip("Prisma Control Center\nHardware não disponível ou módulo não carregado")
         barWidget.setVisible(not hideInactive)
         return
     end
