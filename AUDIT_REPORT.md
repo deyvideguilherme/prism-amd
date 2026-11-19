@@ -1,0 +1,99 @@
+# Auditoria técnica do Prism AMD
+
+## Diagnóstico inicial
+
+Prism AMD v1.0.0, branch `main`, referência `15e0ce19`. O checkout estava limpo e `git ls-remote origin HEAD refs/heads/main` confirmou a mesma revisão no GitHub. A auditoria abrange código, testes, documentação, DKMS, PKGBUILD, ferramenta de versionamento e os arquivos do plugin. A sessão física usa CachyOS, Niri 26.04, Noctalia 5.5.0 e uma Radeon RX 9060 XT (`1002:7590`, `card1`). O módulo instalado já estava carregado com ajustes ativos. A sessão serve para leituras de estado e telemetria. Testes que escrevem no dispositivo exigem uma instância isolada ou acesso independente para recuperação.
+
+### Arquitetura e contratos na revisão auditada
+
+| Componente | Responsabilidade e contrato |
+| --- | --- |
+| `kernel/chroma_amd.c`, `prisma_abi.h` | Configuração global, matriz Rec.709 em S31.32 e injeção em commits AMDGPU. `/dev/chroma_amd` recebe pares `chave=valor` e disponibiliza leitura textual e três ioctls ABI v1. Sysfs expõe ABI e os quatro campos. |
+| `src/cli` | `status`, `set`, `telemetry`, `profile`, `doctor`, versão e ajuda. A descoberta usa DRM sysfs e seleciona uma GPU para telemetria. A calibração usa o módulo. |
+| `src/cli/profiles.cpp` | Arquivos individuais `<nome>.conf` em `$XDG_CONFIG_HOME/prisma/profiles` ou `~/.config/prisma/profiles`, com saturação, contraste, brilho e ativação em texto. |
+| `ui/prisma` | Noctalia API 36. O serviço consome `status --json` e analisa a saída textual de `profile list`. Painel e widget exibem estado, sensores, ajustes e perfis. |
+| `src/layer.cpp`, `shader.comp`, `config.hpp` | Caminho anterior por jogo Vulkan, com shader de compute, manifesto e configuração `/tmp/chroma.conf`. |
+| `src/drm_hook.cpp`, `drm_ctm.cpp` | Caminho anterior por `LD_PRELOAD`, com hooks libdrm/ioctl, CTM e LUT. Independente da CLI, do ABI v1 e da interface. |
+| CMake, DKMS, PKGBUILD | CMake original configurava os legados até para construir apenas a CLI. O PKGBUILD instala CLI, fonte DKMS, udev, carga no boot e plugin. Não havia GitHub Actions. |
+
+### Achados e plano
+
+| Gravidade | Evidência na revisão original | Reprodução e correção |
+| --- | --- | --- |
+| Crítica | `chroma_pre_handler` chama `drm_property_create_blob` no Kprobe. Nos dois kernels a API aloca com `GFP_KERNEL_ACCOUNT`, registra o ID sob mutex com `GFP_KERNEL` e toma `blob_lock`. A última liberação de um blob também pode tomar mutex. | Confirmado em código Linux de ambas as versões e na documentação de Kprobes. Evitar provocar um travamento na sessão ativa. O Kprobe passará somente a descobrir dispositivos e a publicar referências. |
+| Alta | AMDGPU chama `drm_atomic_helper_commit` após `atomic_check`. A sonda troca o estado depois da validação, marca a geração antes de saber se o commit chegou ao hardware e só vê os CRTCs incluídos naquele commit. | Conferir `drm_atomic_commit`, `amdgpu_dm_mode_funcs`, `amdgpu_dm_atomic_check` e `for_each_new_crtc_in_state`. Usar commits novos em contexto de processo, com locks KMS e validação normal do driver. |
+| Alta | `g_crtc_applied_ctm_gen` é global por índice, sem bloqueio ou identidade por dispositivo. As quatro preferências também são lidas e escritas fora do spinlock. | Análise dos caminhos read/write/ioctl/sysfs/Kprobe. Validar concorrência na interface e acompanhar CTM por CRTC de cada dispositivo. |
+| Alta | A desativação substitui por `NULL` qualquer CTM no índice marcado, inclusive uma matriz posterior do compositor. O descarregamento apenas retira a sonda. | Comparar matriz atual e referência exata instalada antes de restaurar. Deixar CTMs externas sob controle do compositor. Descarte, falha e remoção devem liberar referências. |
+| Alta | `chroma_dev_write` publica cada par antes de validar o próximo. Também ignora bytes após NUL. | Validar entradas malformadas em dispositivo isolado. Parse em cópia do estado e publicação indivisível sob o mesmo mutex do ioctl e leitores. |
+| Alta | `load_profile` e `delete_profile` aceitam nomes que a gravação rejeita. Leitura, enumeração e escrita seguem links. A gravação trunca o destino antes de conferir o resultado. | Testes em diretórios temporários com nomes inválidos, links e concorrência. Usar descritores de diretório, impedir links, validar nomes e dados e publicar por rename atômico. |
+| Alta | O alias de tipo DRM presume que a alteração de API ocorreu em 6.13. O header 6.18.60 usado pela máquina ainda define `struct drm_atomic_state`. | Reproduzido com `make KDIR=/lib/modules/6.18.60-2-cachyos-lts/build W=1`, falha de tipo incompleto. Detectar a API nos headers durante o build. |
+| Média | CMake exige ferramentas de shader para configurar `prisma-ctl`. A versão Arch depende de libdrm sem uso na CLI e guardava a URL antiga. | Configuração com compiladores GLSL fora da busca falhou antes de construir a CLI. Isolar caminhos legados por opções e testar empacotamento em um ambiente limpo. |
+| Média | `std::stoi` de `set` aceita sufixos e pode lançar fora do tratamento. `device.cpp` deixa descritores em caminhos de erro da ABI e aceita escrita incompleta. | Testar argumentos no executável e preservar a interface v1. |
+| Média | Descoberta aceita qualquer nome começando com `card`, usa ordenação instável em empate e caminhos de iteração podem lançar numa remoção de dispositivo. JSON não escapa strings de telemetria. | Testar sysfs com múltiplos cartões e sem GPU, organizar ordenação e proteger leituras transitórias. Preservar as chaves JSON. |
+| Média | O legado DRM depende de layout interno e interceptação de ioctl. O Vulkan tem fluxo próprio de sincronização e recursos. Ambos compartilham arquivo previsível em `/tmp` e não têm cobertura gráfica de integração. | Componentes históricos permanecem disponíveis por opção explícita, fora da instalação atual. Compilar os legados e conservar os testes CTM. Sua execução em produção requer auditoria e validação próprias. |
+| Baixa | Testes existentes usam `assert`, desativado em Release, e os testes CLI usam caminhos temporários fixos. | Exercitar os testes também em Release com as asserções ativas e diretórios únicos. |
+
+A correção de cor retém a calibração global e a aplica por dispositivo e CRTC em novos commits atômicos. Nenhum ponteiro do estado recebido pelo commit original será enfileirado. O driver pode rejeitar a transação. O Prisma mantém preferência de cor separada da realidade do display, preserva CTM de origem externa, e acompanha a identidade do blob que instalou. A implementação deve comprovar vida útil da GPU e sincronização de suspensão/descarregamento antes de tocar o dispositivo.
+
+### Referências primárias consultadas
+
+- [Contexto dos handlers de Kprobes](https://docs.kernel.org/trace/kprobes.html).
+- [Criação e liberação de blobs em Linux 6.18.60](https://github.com/gregkh/linux/blob/v6.18.60/drivers/gpu/drm/drm_property.c) e [Linux 7.3.4](https://github.com/gregkh/linux/blob/v7.3.4/drivers/gpu/drm/drm_property.c).
+- [Atomic check e commit em Linux 6.18.60](https://github.com/gregkh/linux/blob/v6.18.60/drivers/gpu/drm/drm_atomic.c), [contrato DRM/KMS](https://docs.kernel.org/gpu/drm-kms.html) e [ordem de remoção PCI no AMDGPU](https://github.com/gregkh/linux/blob/v6.18.60/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c).
+- [Modo atômico AMD Display Manager em Linux 7.3.4](https://github.com/gregkh/linux/blob/v7.3.4/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c).
+
+## Implementação e revisão final
+
+| Arquivos | Alteração e motivo |
+| --- | --- |
+| `kernel/chroma_amd.c`, `kernel/Makefile`, `kernel/dkms.conf` | Configuração publicada por inteiro sob mutex. O Kprobe só descobre dispositivos, com trylock e agendamento via IRQ work. A fila executa novos commits com locks DRM, validação e propriedade por GPU/CRTC. O vínculo com o símbolo exportado registra a dependência de `drm_kms_helper` quando modular. Kbuild seleciona a API atômica a partir dos headers. O DKMS usa o Makefile, que seleciona o toolchain do kernel. |
+| `kernel/70-chroma-amd.rules`, `packaging/arch/{PKGBUILD,.SRCINFO}` | A regra udev executa antes de `73-seat-late.rules`, dando ao builtin de uaccess a oportunidade de aplicar ACL. O pacote remove a dependência direta de libdrm, declara o compilador C++, documenta os toolchains opcionais de DKMS, executa CTest e aponta para o repositório atual. O release Arch foi incrementado para `1.0.0-2`, com ABI v1. |
+| `src/cli/{device.cpp,doctor.cpp,file_descriptor.hpp,main.cpp}` | Descritores são fechados em caminhos de erro. Escrita incompleta é reportada. Argumentos malformados retornam erro. O diagnóstico distingue falta de GPU e acesso apenas para leitura. A CLI identifica o sucesso de `set` como aceitação das preferências pelo módulo. |
+| `src/cli/{profiles.cpp,telemetry.cpp}` | Validação comum de nomes, diretório percorrido com descritores, rejeição de links, arquivos especiais e escrita compartilhada, publicação e fsync. Leitores concorrentes observam uma versão completa. Seleção de telemetria determinística em empate, leitura tolerante à remoção, números estritos e strings JSON escapadas. |
+| `CMakeLists.txt`, `VkLayer_chroma.json.in` | A CLI padrão usa apenas C++20, CMake e o gerador. Os dois caminhos históricos têm opções independentes. Ambos os compiladores de shader usam o mesmo gerador de header. O manifesto Vulkan configurado referencia o arquivo instalado. |
+| `tests/`, `.github/workflows/ci.yml` | Regressões de persistência e sysfs, teste do dispositivo real em VM, teste de CTM em VKMS e validação do plugin. CI verifica CLI, testes, análise estática, Arch e builds do módulo com headers Arch atual e LTS. |
+| `README.md`, `ARCHITECTURE.md`, `AUDIT_REPORT.md` | Uso, dependências, recuperação, propriedade da CTM, compatibilidade e evidências de validação. |
+
+### Achados adicionais e hipóteses não confirmadas
+
+- O teste do kernel upstream com `drm_kms_helper` modular confirmou que a busca apenas por nome podia falhar no carregamento. A referência explícita ao símbolo agora faz parte das dependências do módulo. A integração com o helper modular passou nos dois kernels de depuração.
+- A análise da configuração udev do host confirmou que a regra anterior vinha depois de `73-seat-late.rules`. O novo arquivo põe o tag de acesso antes do builtin. A verificação sintática passou. A ACL em uma sessão de login continua pendente.
+- A revisão original já chamava `unregister_kprobe()` antes de desmontar as interfaces, e o caso normal de criação de blob equilibrava as referências de criação e de substituição. O erro confirmado era o contexto dessas chamadas e a ausência de limpeza da CTM instalada. Nenhum uso após liberação ou vazamento foi observado em execução da revisão original.
+- O Vulkan e o interceptor DRM funcionam como alvos independentes. Suas dependências são necessárias nos builds explícitos dos legados. Esses componentes não integram o caminho CLI, DKMS e Noctalia do pacote atual.
+
+### Decisões e compatibilidade
+
+- A atualização das preferências é transacional. A programação das saídas é independente porque cada GPU tem seu próprio estado DRM e restrições. Um commit rejeitado permanece sem efeito naquela saída e é registrado no log. A fila pode repetir a aplicação.
+- Um CRTC com CTM externa tem precedência sobre a calibração do Prisma. A restauração compara o objeto atual e a referência exata instalada pelo Prisma sob o lock de modeset. Assim, um commit posterior do compositor só é seguido por uma limpeza se a CTM ainda for a mesma.
+- A primeira descoberta ocorre após um commit no helper DRM. Após isso, mudanças de preferências agendam a fila imediatamente. Dispositivos conhecidos são reavaliados a cada dois segundos. A fila evita acordar GPU em runtime suspend.
+- Os comandos e aliases, ABI v1, chaves e estrutura de JSON e saída de `profile list` continuam disponíveis para o plugin. Os perfis regulares existentes continuam no mesmo formato e caminho. Arquivos com aliases, permissões de escrita compartilhada ou diretórios simbólicos precisam ser movidos para o diretório autorizado. Valores malformados passam a ser rejeitados.
+- Vulkan e `LD_PRELOAD` continuam compiláveis e instaláveis mediante flags explícitas. Os binários históricos e `/tmp/chroma.conf` são independentes da configuração do módulo.
+- A CLI mantém telemetria de uma GPU selecionada. O módulo mantém a propriedade da CTM por dispositivo e CRTC. O cenário físico com várias GPUs ou CRTCs ativos permanece pendente.
+
+### Testes e evidências
+
+Os testes usaram CachyOS x86_64 no host, uma raiz Arch Linux limpa isolada com Bubblewrap e QEMU 11.1.3 com KVM para os testes privilegiados. As VMs de interface utilizaram initramfs com BusyBox e executáveis estáticos. Duas compilações de depuração usaram a fonte upstream Linux 6.18.60, uma com KASAN e outra com KCSAN. A configuração das duas incluiu Lockdep, `DEBUG_ATOMIC_SLEEP` e Dynamic Debug.
+
+| Comando ou procedimento | Resultado e evidência | Alcance |
+| --- | --- | --- |
+| `cmake -S . -B build-legacy -DPRISMA_BUILD_LEGACY_DRM=ON -DPRISMA_BUILD_LEGACY_VULKAN=ON`, `cmake --build build-legacy`, `ctest --test-dir build-legacy --output-on-failure` | `test_cli` e `test_ctm` passaram em Release, com asserts ativos. Inclui arquivo temporário, validação uniforme, links e FIFO, gravação/leitura concorrente, seleção entre dois cartões e ausência de GPU. | Os cartões adicionais são árvores sysfs de teste. |
+| CMake com `-DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer'` seguido de build e CTest | 2/2 testes passaram com ASan e UBSan. `clang-tidy --checks='-*,clang-analyzer-*' -p build src/cli/*.cpp` terminou sem diagnósticos. | C++ e funções de teste executadas, sem instrumentar o processo gráfico. |
+| `cmake -S . -B /tmp/cli-only -DBUILD_TESTING=OFF`, `cmake --build /tmp/cli-only --target prisma-ctl`, `makepkg --printsrcinfo`, `makepkg`, `bsdtar -tf <pacote>` | A raiz Arch sem Vulkan, libdrm ou compilador de shader produziu a CLI ABI v1 e `prisma-control-center-1.0.0-2-x86_64.pkg.tar.zst`. A etapa `check()` passou. O pacote contém CLI, código DKMS, regra udev e plugin. A instalação de arquivos com `pacman -U` permitiu executar a CLI e `pacman -Qk` encontrou 26 arquivos e zero ausências. | A raiz de instalação não estava inicializada com systemd e os hooks de carga/DKMS reclamaram da ausência de systemd e de `/usr/lib/modules`. O build DKMS foi verificado separadamente. |
+| `cmake --build build --target install-local install-ui` e alvos de remoção com um home temporário. CMake com `-DGLSLANG_VALIDATOR=FALSE -DGLSLC=/usr/bin/glslc` e alvo `VkLayer_chroma`. | Instalação e remoção local passaram. O manifesto Vulkan aponta para a biblioteca instalada. O build Vulkan passou com glslangValidator e com glslc. | Validação de artefatos, sem execução gráfica dos interceptores históricos. |
+| `make -C kernel KDIR=<headers> W=1 C=2 CHECK=<sparse>` | Builds CachyOS 6.18.60 e 7.3.4 concluíram com Sparse 0.6.5-rc1. Os logs registraram `CHECK chroma_amd.c` nos dois. Smatch no modo `-p=kernel` e Checkpatch no módulo também concluíram sem diagnósticos. | Compilação x86_64 e análise estática. |
+| `dkms build -m chroma-amd -v 1.0.0 -k <release> --kernelsourcedir <headers>` | Builds DKMS nos dois kernels CachyOS concluíram em raiz isolada. A geração de BTF exigiu `pahole`. | A assinatura do módulo e o carregamento com Secure Boot exigem teste no ambiente de destino. |
+| `QEMU=<qemu-system-x86_64> tests/run-kernel-vm.sh <vmlinuz> <chroma_amd.ko> <busybox> <prisma-ctl> <test_kernel_abi>` | A revisão original falhou em 7.3.4 com `rejected text changed settings`. A correção passou em 6.18.60 CachyOS LTS e 7.3.4 CachyOS com `PASS kernel ABI, validation and concurrent transactions`, `PASS PM devices suspend/resume test` e `PASS kernel integration`. | O teste de PM usa `pm_test=devices` e `freeze`. As VMs dessa linha usam o módulo de produção e não têm GPU AMD. |
+| `test_vkms_ctm /dev/dri/card0` em QEMU | Validou os coeficientes Rec.709 observando o blob, aplicou novo ganho e contraste, substituiu a matriz via commit de um cliente DRM externo, preservou-a ao desativar e limpou a matriz própria ao descarregar. Dynamic Debug registrou commits com ID de blob e retorno a zero. | VKMS com CTM anunciada por uma alteração em cópia temporária. O módulo de teste observa `vkms`. O módulo de produção observa `amdgpu`. |
+| Runner da ABI e `test_vkms_ctm` nas duas variantes upstream com instrumentação | A primeira execução de VKMS com Lockdep encontrou `inconsistent {INITIAL USE} -> {IN-NMI} usage` ao agendar trabalho diretamente do breakpoint. O agendamento passou para IRQ work. O estresse da ABI também registrou `data-race in move_linked_works / try_to_grab_pending` no kernel ao chamar `mod_delayed_work_on`. A aplicação imediata passou a usar trabalho coalescido e a reavaliação periódica usa um timer separado. A versão final passou em `PASS VKMS guest` e `PASS kernel integration` nas duas variantes, com três execuções de estresse da ABI sob KCSAN sem diagnóstico. | Uma VM com KASAN e outra com KCSAN Strict. Ambas usam Lockdep e `DEBUG_ATOMIC_SLEEP`. |
+| `luau-compile --null ui/prisma/*.luau`, `python3 tests/check_ui.py`, `actionlint .github/workflows/ci.yml`, `udevadm verify kernel/70-chroma-amd.rules` | Compilação dos scripts Luau, manifesto, traduções, workflow e regra udev passaram localmente. | A execução do workflow no GitHub depende de publicar as alterações. A atribuição de ACL no login físico está pendente. |
+| `prisma-ctl status --json`, `telemetry --json`, `doctor`, `modetest -M amdgpu -D /dev/dri/card1 -c -p`, `noctalia msg plugins list` | RX 9060 XT `1002:7590`, PCI `0000:2d:00.0`, DP-2 2560×1440 e propriedades CTM visíveis. Sensores e JSON retornados pela CLI desta revisão. O plugin instalado estava habilitado no Noctalia 5.5.0. | Leituras na sessão física. O módulo ativo no host era o anterior. |
+
+Para reproduzir a integração sem tocar no dispositivo do host, use `tests/run-kernel-vm.sh`. Compile os binários convidados com `g++ -std=c++20 -O2 -static -pthread -Ikernel -Isrc src/cli/*.cpp -o prisma-ctl` e `g++ -std=c++20 -O2 -static -pthread -Ikernel tests/test_kernel_abi.cpp -o test_kernel_abi`. O runner aceita `drm_kms_helper.ko` no sexto argumento quando o helper é modular.
+
+O alvo opcional `test_vkms_ctm` requer libdrm. Para reproduzir em VM, compile uma cópia do VKMS com o argumento de CTM de `drm_crtc_enable_color_mgmt()` ajustado para `true`. Em uma cópia separada do módulo Prisma, use `vkms` como filtro de driver. Inicialize o convidado com os dois módulos e as dependências KMS. Carregue Prisma com `dyndbg=+p` e depois VKMS. Execute o binário sobre o dispositivo virtual.
+
+A reprodução de persistência compilou `device.cpp` e `profiles.cpp` obtidos por `git archive HEAD` com um executável de teste em diretório temporário. O código original seguiu um link na leitura e alterou o arquivo de teste indicado pelo link na gravação. A suíte nova confirma a rejeição de links simbólicos e físicos e preserva o arquivo de teste.
+
+### Avaliação de entrega
+
+O userspace está apto para uso local. O módulo está apto para distribuição experimental com revisão de logs e procedimento de recuperação documentado. A validação física do módulo atualizado é condição para distribuição geral. A sessão tinha uma única GPU AMD e a troca privilegiada do módulo exigia credenciais administrativas e um canal independente de recuperação. Permanecem pendentes alteração visual, funcionamento prolongado ao lado de um compositor real, múltiplas GPUs físicas, hot-unplug AMDGPU, suspensão e retomada física e validação após reinicialização da estação. Nenhum travamento físico, corrupção de estado por hot-unplug ou vazamento do módulo anterior foi provocado nesta sessão. Os caminhos históricos permanecem experimentais e precisam de uma auditoria de integração própria.

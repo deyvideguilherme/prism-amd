@@ -4,29 +4,28 @@ Calibragem de cor em hardware e monitoramento de sensores para placas de vídeo 
 
 ## 1. Visão Geral e Arquitetura
 
-O Prisma Control Center (`chroma-layer`) é uma solução integrada para ajuste de exibição em hardware e telemetria de GPUs AMD (`amdgpu`) no Linux. Em vez de utilizar shaders ou pós-processamento na composição gráfica, o projeto atua diretamente na saída de vídeo do Display Core Next (DCN) via DRM/KMS, aplicando saturação, contraste e ganho de brilho na matriz linear 3x3 com custo computacional nulo para a CPU e GPU.
+O Prisma Control Center (`prism-amd`) ajusta a saída de vídeo de GPUs AMD (`amdgpu`) via DRM/KMS e monitora sensores pelo sysfs. A calibração SDR usa uma matriz linear de saturação, contraste e ganho de brilho no pipeline de exibição.
 
 A suíte é composta por três componentes:
 
-- **Módulo de Kernel (`kernel/chroma_amd.ko`):** Módulo dinâmico que intercepta requisições atômicas KMS (`drm_atomic_helper_commit`) via kprobe. Injeta a matriz CTM Rec.709 3x3 calculada em aritmética inteira de 64 bits (formato S31.32), integrando saturação, contraste e brilho linear. Mantém a curva de transferência sRGB nativa de hardware do display controller inalterada, evitando distorções de gama e lavagem de tons escuros. Expõe o dispositivo de caractere `/dev/chroma_amd` (`miscdevice`) e nós de telemetria em `/sys/kernel/chroma_amd/`.
+- **Módulo de Kernel (`kernel/chroma_amd.ko`).** Descobre GPUs AMD com suporte a CTM ao observar `drm_atomic_helper_commit`. Aplica a matriz Rec.709 em uma transação própria validada pelo DRM e pelo AMDGPU. Expõe a configuração em `/dev/chroma_amd` e atributos de leitura em `/sys/kernel/chroma_amd/`.
 - **Utilitário CLI (`prisma-ctl`):** Utilitário de linha de comando em C++20 para consulta de telemetria do driver `amdgpu` e `hwmon`, ajuste atômico de parâmetros em `/dev/chroma_amd` e gerenciamento de perfis em `~/.config/prisma/profiles/`.
 - **Plugin Noctalia Shell (`ui/prisma`):** Plugin nativo para o ambiente Noctalia Shell no compositor Niri (Wayland). Oferece um widget de barra com monitoramento em tempo real e uma central de controle visual com abas de **Desempenho**, **Tela & Cor** e **Perfis**.
 
 ## 2. Requisitos de Sistema
 
-- **Distribuição:** Arch Linux, CachyOS ou distribuições baseadas em Linux com suporte a DRM/KMS e GPUs AMD (RDNA / GCN).
-- **Pacotes do sistema:**
-  - Headers do kernel Linux ativo (`linux-headers` ou `linux-cachyos-headers`)
-  - Compilador C/C++ (`clang` com suporte a `LLVM=1` para CachyOS, ou `gcc`)
-  - `cmake` (>= 3.20) e `make`
-  - Ferramentas de desenvolvimento base (`base-devel`, `libdrm`)
-  - Noctalia Shell (para execução do painel gráfico)
+- **CLI.** Linux com compilador C++20, CMake 3.20 ou mais recente e Make ou Ninja.
+- **Módulo.** Headers do kernel alvo, Kbuild, suporte a Kprobes, IRQ work e ao acesso a argumentos da arquitetura, DRM/KMS e AMDGPU com propriedade CTM nas saídas de interesse.
+- **DKMS no Arch/CachyOS.** Instale os headers e a cadeia de compilação do kernel alvo. Kernels compilados com Clang usam Clang, LLVM e LLD. Headers que geram BTF para módulos podem exigir `pahole`.
+- **Interface.** Noctalia Shell com suporte à API 36 do plugin.
+
+O módulo foi compilado para CachyOS x86_64 **6.18.60-2-cachyos-lts** e **7.3.4-1-cachyos**. A integração com o dispositivo de caractere foi executada nesses kernels em QEMU. O [relatório de auditoria](AUDIT_REPORT.md) registra o alcance dos testes de DRM e hardware.
 
 ## 3. Compilação e Instalação
 
 ### Instalação Recomendada no Arch Linux / CachyOS (DKMS)
 
-O repositório fornece empacotamento completo com suporte a DKMS para Arch Linux, CachyOS e distribuições derivadas. O pacote compila a CLI, instala as regras de permissão udev, configura o carregamento automático do módulo e registra o código-fonte no DKMS para reconstrução automática a cada atualização de kernel.
+A partir de um checkout completo do repositório, é possível usar o empacotamento com suporte a DKMS para Arch Linux, CachyOS e distribuições derivadas. O pacote compila a CLI, instala as regras de permissão udev, configura o carregamento automático do módulo e registra o código-fonte no DKMS para reconstrução automática a cada atualização de kernel.
 
 Para compilar e instalar o pacote:
 
@@ -35,7 +34,7 @@ cd packaging/arch
 makepkg -si
 ```
 
-O suporte a GPUs abrange tanto placas dedicadas (Radeon RX) quanto processadores com vídeo integrado (APUs Ryzen), identificando dinamicamente a GPU ativa através da enumeração de `/sys/class/drm/` e conectores com display ativo, sem necessidade de configuração manual de índices (`card0` ou `card1`).
+A CLI enumera adaptadores AMD via `/sys/class/drm/` e prioriza a telemetria de uma GPU com tela conectada. O módulo acompanha separadamente os CRTCs dos dispositivos AMDGPU descobertos com suporte a CTM.
 
 Após a instalação do pacote, habilite o plugin no Noctalia Shell:
 
@@ -76,6 +75,18 @@ Para permitir que o serviço do Noctalia Shell valide e execute a CLI em qualque
 sudo ln -sf ~/.local/bin/prisma-ctl /usr/local/bin/prisma-ctl
 ```
 
+### Compilação dos componentes históricos
+
+As opções abaixo habilitam a camada Vulkan e o interceptor DRM via `LD_PRELOAD`. São componentes experimentais independentes do módulo e da CLI. Vulkan exige os headers Vulkan e `glslangValidator` ou `glslc`. O interceptor DRM exige `pkg-config` e os headers de libdrm. Ambos usam a configuração descrita em `chroma.conf.example`.
+
+```bash
+cmake -S . -B build-legacy -DPRISMA_BUILD_LEGACY_VULKAN=ON -DPRISMA_BUILD_LEGACY_DRM=ON
+cmake --build build-legacy
+ctest --test-dir build-legacy --output-on-failure
+```
+
+Com as opções habilitadas, `install-local` instala também os legados selecionados. A camada Vulkan usa `ENABLE_CHROMA_LAYER=1` e o manifesto local do Vulkan. Use as opções correspondentes ao executar `uninstall-local` para remover uma instalação legada anterior.
+
 ## 4. Configuração do Módulo e Permissões (Instalação Manual)
 
 Se você instalou via pacote `PKGBUILD`, as permissões udev e o carregamento no boot já foram configurados automaticamente. Para instalações manuais:
@@ -95,12 +106,14 @@ Para verificar o registro no log do kernel:
 sudo dmesg | grep chroma_amd
 ```
 
-Para descarregar:
+Para desativar a calibração e descarregar, mantenha disponível um TTY ou uma sessão SSH com acesso administrativo.
 
 ```bash
-cd kernel
-sudo make unload
+prisma-ctl set --enabled 0
+sudo modprobe -r chroma_amd
 ```
+
+Se a remoção do módulo for feita numa instalação de desenvolvimento, use `sudo make -C kernel unload`. O descarregamento também tenta remover as CTMs ainda pertencentes ao Prisma. Um erro de restauração é registrado no log do kernel. Se a sessão gráfica precisar de recuperação, confirme que o módulo foi removido pelo TTY ou SSH e reinicie o compositor. O parâmetro de boot `module_blacklist=chroma_amd` impede a carga durante uma inicialização de recuperação.
 
 ### Acesso sem Root (Regra udev)
 
@@ -203,11 +216,11 @@ Faixas de valores suportadas:
 - `saturation` (`-s`): `0` a `400` (padrão `100`; `0` = monocromático, `100` = normal, `200` = saturação dobrada)
 - `contrast` (`-c`): `10` a `300` (padrão `100`; fator linear de contraste)
 - `brightness` (`-b`): `-100` a `100` (padrão `0`; ganho de luminância linear de 0.25x a 1.75x na matriz CTM)
-- `enabled` (`-e`): `0` ou `1` (padrão `1`; restaura bypass quando desativado)
+- `enabled` (`-e`): `0` ou `1` (padrão `1`; desativa a calibração do Prisma, preservando a CTM externa)
 
 ### Gerenciamento de Perfis
 
-Os perfis são armazenados como arquivos individuais em `~/.config/prisma/profiles/<nome>.conf`:
+Os perfis são armazenados como arquivos individuais em `~/.config/prisma/profiles/<nome>.conf` ou `$XDG_CONFIG_HOME/prisma/profiles/<nome>.conf`. Use um diretório real e gravável apenas pelo proprietário. Perfis existentes no formato `chave=valor` continuam válidos. O módulo reinicia com os valores padrão. Use `profile apply` para reaplicar um perfil após reiniciar. Para migrar perfis mantidos por links, copie os arquivos regulares para esse diretório e substitua os links.
 
 ```bash
 # Salvar o estado ativo como um perfil
@@ -255,7 +268,7 @@ Prisma Control Center - System Self-Diagnostic (doctor)
        * Board power:           20.0 W
 
 ------------------------------------------------------
-Diagnosis: All checks passed. System is fully operational.
+Diagnosis: Module access, ABI and AMD GPU detection passed.
 ```
 
 O comando retorna código de saída `0` quando todos os componentes estão saudáveis e `1` caso seja detectada qualquer falha crítica (módulo não carregado, ausência de permissões no grupo `video`, descompasso de ABI ou ausência de GPU AMD).
@@ -269,15 +282,11 @@ prisma-ctl --version
 
 ## 7. Compatibilidade de Espaço de Cor: Modo SDR vs HDR / ICC
 
-A calibragem de cores do Prisma Control Center atua diretamente na matriz linear 3x3 de transformação de cor (CTM) no bloco de hardware do display controller AMD (DCN). Essa abordagem foi concebida especificamente para espaços de cor de faixa dinâmica padrão (SDR - Rec.709 / sRGB).
+A calibração destina-se a SDR Rec.709. O Prisma usa a propriedade CTM de cada CRTC elegível. As propriedades de gamma e degamma permanecem sob controle do compositor. Com HDR ou um perfil ICC ativo, desative a calibração para evitar uma transformação SDR no pipeline.
 
-### Interação com Compositor e HDR
+A descoberta de uma GPU requer que ela passe pelo helper DRM observado depois que o módulo é carregado. Em uma sessão ociosa, a primeira descoberta pode depender do próximo commit do compositor. Em GPUs descobertas, a CLI confirma que o módulo aceitou a configuração. A transação de hardware ocorre separadamente, sem reiniciar a sessão. O driver pode rejeitá-la. Consulte o log do kernel para erros de commit.
 
-- **Operação em SDR (Recomendada):** Em desktops Wayland como o Niri ou compositores baseados em wlroots, as cores das janelas SDR são mapeadas linearmente através da CTM. A calibragem de saturação, contraste e brilho opera diretamente na saída de vídeo sem distorção da curva sRGB nativa.
-- **Interferência com HDR e Perfis ICC:** Recursos avançados de composição HDR (como curvas PQ/BT.2086) e calibrações de perfil ICC gerenciadas pelo compositor também concorrem pela matriz CTM ou blocos de LUT 3D do CRTC.
-  - Quando a calibragem do Prisma está ativa (`enabled=1`), a matriz Rec.709 do Prisma assume o controle do pipeline de cor do CRTC para garantir a vivacidade solicitada pelo usuário.
-  - Para fluxos de trabalho que exigem fidelidade estrita de perfil ICC ou exibição de conteúdo nativo HDR pelo compositor, desative a calibragem do Prisma (`prisma-ctl set --enabled 0` ou via chave geral na interface).
-- **Preservação de CTM do Compositor ao Desativar:** Quando `enabled=0`, o módulo de kernel `chroma_amd` limpa a injeção ativa e não intercepta nem sobrescreve matrizes CTM configuradas pelo compositor (como o filtro Night Light/Luz Noturna ou calibrações de ICC).
+Se o compositor já tiver uma CTM, a calibração cede a saída ao compositor. O módulo remove apenas o blob exato que instalou com sucesso. A desativação também preserva uma matriz mais recente definida pelo compositor. O comportamento vale por saída e por GPU.
 
 ## 8. Sincronização e Automação de Versões (scripts/bump-version.sh)
 
@@ -287,7 +296,7 @@ Para garantir integridade e consistência de versão entre todos os subsistemas 
 ./scripts/bump-version.sh 1.0.0
 ```
 
-O script executa as seguintes etapas de forma atômica:
+O script executa as seguintes etapas:
 1. Valida o formato semântico (`X.Y.Z`).
 2. Atualiza `CMakeLists.txt` (`project(prisma VERSION ...)`).
 3. Atualiza `kernel/dkms.conf` (`PACKAGE_VERSION=...`).
@@ -302,7 +311,7 @@ O script executa as seguintes etapas de forma atômica:
 É possível inspecionar e alterar o estado do hardware sem utilizar a CLI:
 
 ```bash
-# Escrita de parâmetros (atômica, sem root com udev configurado)
+# Escrita transacional dos parâmetros desejados (sem root com udev configurado)
 echo "saturation=160 contrast=115 brightness=10" > /dev/chroma_amd
 
 # Leitura do estado ativo
@@ -318,4 +327,4 @@ cat /sys/kernel/chroma_amd/enabled
 
 ## 10. Licença
 
-Código em userspace sob licença MIT. Módulo de kernel sob licença Dual MIT / GPL v2.
+Código em userspace sob licença MIT. Módulo de kernel sob GPL-2.0-only.
