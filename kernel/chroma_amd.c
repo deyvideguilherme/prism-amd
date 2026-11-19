@@ -405,6 +405,9 @@ static bool chroma_try_enqueue_locked(struct drm_device *dev)
 	struct chroma_gpu *gpu;
 	unsigned int i, slot = ARRAY_SIZE(pending);
 
+	if (!dev || !dev->driver || !dev->driver->fops)
+		return false;
+
 	list_for_each_entry(gpu, &gpus, link) {
 		if (gpu->dev == dev)
 			return false;
@@ -475,6 +478,7 @@ static void chroma_scan_pci(void)
 	while ((pdev = pci_get_device(PCI_VENDOR_ID_ATI, PCI_ANY_ID, pdev)) != NULL) {
 		struct drm_device *dev = NULL;
 		unsigned long flags;
+		bool enq = false;
 
 		if ((pdev->class >> 16) != PCI_BASE_CLASS_DISPLAY)
 			continue;
@@ -484,12 +488,13 @@ static void chroma_scan_pci(void)
 			dev = pci_get_drvdata(pdev);
 			if (dev && READ_ONCE(dev->registered) && dev->mode_config.ctm_property) {
 				raw_spin_lock_irqsave(&discovery_lock, flags);
-				if (chroma_try_enqueue_locked(dev)) {
+				enq = chroma_try_enqueue_locked(dev);
+				raw_spin_unlock_irqrestore(&discovery_lock, flags);
+				if (enq) {
 					enqueued = true;
 					pr_debug("chroma_amd: proactive PCI scan enqueued %s (%s)\n",
 						 dev_name(dev->dev), pci_name(pdev));
 				}
-				raw_spin_unlock_irqrestore(&discovery_lock, flags);
 			}
 		}
 		device_unlock(&pdev->dev);
@@ -585,39 +590,18 @@ static int chroma_observe(struct kprobe *probe, struct pt_regs *regs)
 	unsigned long flags;
 	bool discovered = false;
 
-	if (!dev) {
-		pr_debug("chroma_amd: observe: dev is NULL\n");
+	if (!dev || !dev->driver || !dev->driver->name || strcmp(dev->driver->name, "amdgpu") ||
+	    !READ_ONCE(dev->registered) || !dev->mode_config.ctm_property)
 		return 0;
-	}
-	if (!dev->driver || !dev->driver->name) {
-		pr_debug("chroma_amd: observe: device has no driver/name\n");
-		return 0;
-	}
-	if (strcmp(dev->driver->name, "amdgpu")) {
-		pr_debug("chroma_amd: observe: driver '%s' is not amdgpu\n", dev->driver->name);
-		return 0;
-	}
-	if (!READ_ONCE(dev->registered)) {
-		pr_debug("chroma_amd: observe: %s is not registered\n", dev_name(dev->dev));
-		return 0;
-	}
-	if (!dev->mode_config.ctm_property) {
-		pr_debug("chroma_amd: observe: %s has no ctm_property\n", dev_name(dev->dev));
-		return 0;
-	}
 
 	/* An INT3 probe can enter with NMI accounting. Defer on contention. */
-	if (!raw_spin_trylock_irqsave(&discovery_lock, flags)) {
-		pr_debug("chroma_amd: observe: discovery_lock contended\n");
+	if (!raw_spin_trylock_irqsave(&discovery_lock, flags))
 		return 0;
-	}
 	discovered = chroma_try_enqueue_locked(dev);
 	raw_spin_unlock_irqrestore(&discovery_lock, flags);
 
-	if (discovered) {
-		pr_debug("chroma_amd: observe: enqueued %s via kprobe\n", dev_name(dev->dev));
+	if (discovered)
 		irq_work_queue(&discovery_irq);
-	}
 	return 0;
 }
 NOKPROBE_SYMBOL(chroma_observe);
