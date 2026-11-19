@@ -406,6 +406,9 @@ static int __init chroma_init(void)
 		return ret;
 	}
 
+	/* Notify udev that sysfs attributes are ready */
+	kobject_uevent(chroma_kobj, KOBJ_ADD);
+
 	/* Register kprobe on drm_atomic_helper_commit */
 	ret = register_kprobe(&chroma_kp);
 	if (ret < 0) {
