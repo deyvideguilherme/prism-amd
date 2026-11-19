@@ -1,6 +1,7 @@
 --!nonstrict
 -- Prisma Control Center - Interactive Desktop Panel
 -- Visual control center featuring live hardware telemetry, DCN color calibration, and profile management.
+-- Uses standard Noctalia native primitives (ui.column, ui.row, ui.label, ui.button, ui.progress, ui.input, ui.scroll).
 
 local currentTab = "performance" -- "performance" | "color" | "profiles"
 local newProfileName = ""
@@ -39,7 +40,6 @@ end
 
 local function performanceView()
     local telem = (if statusData and statusData.telemetry then statusData.telemetry else {})
-    local hist = (if statusData and statusData.history then statusData.history else {})
 
     local gpuBusy = if type(telem.gpu_busy_percent) == "number" then telem.gpu_busy_percent else 0
     local sclkMhz = if type(telem.sclk_mhz) == "number" then telem.sclk_mhz else 0
@@ -55,144 +55,108 @@ local function performanceView()
     local pciId = if type(telem.pci_id) == "string" and telem.pci_id ~= "" then telem.pci_id else "AMD GPU"
     local devId = if type(telem.device_id) == "string" and telem.device_id ~= "" then telem.device_id else "DCN"
 
-    local histGpu = if type(hist.gpu_busy) == "table" and #hist.gpu_busy > 0 then hist.gpu_busy else { 0 }
-    local histTemp = if type(hist.temp_junction) == "table" and #hist.temp_junction > 0 then hist.temp_junction else { 0 }
-    local histPower = if type(hist.power) == "table" and #hist.power > 0 then hist.power else { 0 }
-
-    -- Card 1: GPU Load
-    local gpuCard = ui.box({
-        fill = "surface_container",
-        radius = 12,
-        paddingH = 14,
-        paddingV = 12,
-        flexGrow = 1,
-    }, {
-        ui.column({ gap = 8, align = "stretch" }, {
-            ui.row({ align = "center", justify = "space_between" }, {
-                ui.label({ text = "CARGA DA GPU", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
-                ui.label({ text = `{sclkMhz} MHz`, fontSize = 12, color = "on_surface_variant" }),
-            }),
-            ui.row({ align = "baseline", gap = 4 }, {
-                ui.label({ text = `{gpuBusy}%`, fontSize = 26, fontWeight = "bold", color = "primary" }),
-            }),
-            ui.graph({
-                values = histGpu,
-                height = 42,
-                color = "primary",
-                fillOpacity = 0.25,
-                lineWidth = 2,
-            }),
-        }),
-    })
-
-    -- Card 2: Temperature
-    local tempCard = ui.box({
-        fill = "surface_container",
-        radius = 12,
-        paddingH = 14,
-        paddingV = 12,
-        flexGrow = 1,
-    }, {
-        ui.column({ gap = 8, align = "stretch" }, {
-            ui.row({ align = "center", justify = "space_between" }, {
-                ui.label({ text = "TEMPERATURA", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
-                ui.label({ text = `Edge: {tempEdge}°C`, fontSize = 12, color = "on_surface_variant" }),
-            }),
-            ui.row({ align = "baseline", gap = 4 }, {
-                ui.label({
-                    text = `{tempJunc}°C`,
-                    fontSize = 26,
-                    fontWeight = "bold",
-                    color = if tempJunc > 85 then "error" else "secondary",
-                }),
-                ui.label({ text = "Hotspot", fontSize = 12, color = "on_surface_variant" }),
-            }),
-            ui.graph({
-                values = histTemp,
-                height = 42,
-                color = if tempJunc > 85 then "error" else "secondary",
-                fillOpacity = 0.25,
-                lineWidth = 2,
-            }),
-        }),
-    })
-
-    -- Card 3: Power Consumption
-    local powerCard = ui.box({
-        fill = "surface_container",
-        radius = 12,
-        paddingH = 14,
-        paddingV = 12,
-        flexGrow = 1,
-    }, {
-        ui.column({ gap = 8, align = "stretch" }, {
-            ui.label({ text = "CONSUMO DE ENERGIA", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
-            ui.row({ align = "baseline", gap = 4 }, {
-                ui.label({ text = `{powerW} W`, fontSize = 26, fontWeight = "bold", color = "on_surface" }),
-            }),
-            ui.graph({
-                values = histPower,
-                height = 42,
-                color = "outline_variant",
-                fillOpacity = 0.25,
-                lineWidth = 2,
-            }),
-        }),
-    })
-
-    -- Card 4: VRAM Allocation
-    local vramCard = ui.box({
-        fill = "surface_container",
-        radius = 12,
-        paddingH = 14,
-        paddingV = 12,
-        flexGrow = 1,
-    }, {
-        ui.column({ gap = 8, align = "stretch" }, {
-            ui.row({ align = "center", justify = "space_between" }, {
-                ui.label({ text = "MEMÓRIA VRAM", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
-                ui.label({
-                    text = `{string.format("%.1f", vramUsed / 1024)} / {string.format("%.1f", vramTotal / 1024)} GiB`,
-                    fontSize = 12,
-                    color = "on_surface_variant",
-                }),
-            }),
-            ui.row({ align = "baseline", gap = 4 }, {
-                ui.label({ text = `{math.floor(vramRatio * 100 + 0.5)}%`, fontSize = 26, fontWeight = "bold", color = "primary" }),
-            }),
-            ui.progress({
-                value = vramRatio,
-                color = "primary",
-            }),
-        }),
-    })
-
-    -- Hardware Identity Footer Box
-    local infoBox = ui.box({
-        fill = "surface_container",
-        radius = 12,
-        paddingH = 14,
-        paddingV = 10,
-    }, {
+    -- 1. GPU Load & SCLK Clock Block
+    local gpuBlock = ui.column({ gap = 4, align = "stretch" }, {
         ui.row({ align = "center", justify = "space_between" }, {
-            ui.row({ gap = 12, align = "center" }, {
-                ui.label({ text = card, fontSize = 12, fontWeight = "bold", color = "on_surface" }),
-                ui.label({ text = pciId, fontSize = 12, color = "on_surface_variant" }),
-                ui.label({ text = devId, fontSize = 12, color = "on_surface_variant" }),
-            }),
-            ui.label({
-                text = if statusData and statusData.available then "Hardware Ativo" else "Offline",
-                fontSize = 12,
-                fontWeight = "bold",
-                color = if statusData and statusData.available then "primary" else "error",
-            }),
+            ui.label({ text = "CARGA DA GPU", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
+            ui.label({ text = `{sclkMhz} MHz`, fontSize = 12, color = "on_surface_variant" }),
+        }),
+        ui.row({ align = "baseline", gap = 6 }, {
+            ui.label({ text = `{gpuBusy}%`, fontSize = 22, fontWeight = "bold", color = "primary" }),
+            ui.label({ text = "Atividade de processamento gráfico", fontSize = 11, color = "on_surface_variant" }),
+        }),
+        ui.progress({
+            height = 8,
+            radius = 4,
+            progress = clamp(gpuBusy / 100, 0, 1),
+            fill = "primary",
         }),
     })
 
-    return ui.column({ gap = 12, align = "stretch" }, {
-        ui.row({ gap = 12, align = "stretch" }, { gpuCard, tempCard }),
-        ui.row({ gap = 12, align = "stretch" }, { powerCard, vramCard }),
-        infoBox,
+    -- 2. Temperatures Block (Hotspot & Edge)
+    local tempBlock = ui.column({ gap = 4, align = "stretch" }, {
+        ui.row({ align = "center", justify = "space_between" }, {
+            ui.label({ text = "TEMPERATURA", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
+            ui.label({ text = `Edge: {tempEdge}°C`, fontSize = 12, color = "on_surface_variant" }),
+        }),
+        ui.row({ align = "baseline", gap = 6 }, {
+            ui.label({
+                text = `{tempJunc}°C`,
+                fontSize = 22,
+                fontWeight = "bold",
+                color = if tempJunc > 85 then "error" else "secondary",
+            }),
+            ui.label({ text = "Sensor Hotspot / Junction", fontSize = 11, color = "on_surface_variant" }),
+        }),
+        ui.progress({
+            height = 8,
+            radius = 4,
+            progress = clamp(tempJunc / 110, 0, 1),
+            fill = if tempJunc > 85 then "error" else "secondary",
+        }),
+    })
+
+    -- 3. Power Consumption Block
+    local powerBlock = ui.column({ gap = 4, align = "stretch" }, {
+        ui.row({ align = "center", justify = "space_between" }, {
+            ui.label({ text = "CONSUMO DE ENERGIA", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
+            ui.label({ text = "hwmon", fontSize = 12, color = "on_surface_variant" }),
+        }),
+        ui.row({ align = "baseline", gap = 6 }, {
+            ui.label({ text = `{powerW} W`, fontSize = 22, fontWeight = "bold", color = "on_surface" }),
+            ui.label({ text = "Potência elétrica da placa", fontSize = 11, color = "on_surface_variant" }),
+        }),
+        ui.progress({
+            height = 8,
+            radius = 4,
+            progress = clamp(powerW / 300, 0, 1),
+            fill = "primary",
+        }),
+    })
+
+    -- 4. VRAM Allocation Block
+    local vramBlock = ui.column({ gap = 4, align = "stretch" }, {
+        ui.row({ align = "center", justify = "space_between" }, {
+            ui.label({ text = "MEMÓRIA VRAM", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
+            ui.label({
+                text = `{string.format("%.1f", vramUsed / 1024)} / {string.format("%.1f", vramTotal / 1024)} GiB`,
+                fontSize = 12,
+                color = "on_surface_variant",
+            }),
+        }),
+        ui.row({ align = "baseline", gap = 6 }, {
+            ui.label({ text = `{math.floor(vramRatio * 100 + 0.5)}%`, fontSize = 22, fontWeight = "bold", color = "primary" }),
+            ui.label({ text = `{math.floor(vramUsed)} MiB alocados`, fontSize = 11, color = "on_surface_variant" }),
+        }),
+        ui.progress({
+            height = 8,
+            radius = 4,
+            progress = vramRatio,
+            fill = "primary",
+        }),
+    })
+
+    -- Hardware Identity Footer Row
+    local infoRow = ui.row({ align = "center", justify = "space_between" }, {
+        ui.row({ gap = 12, align = "center" }, {
+            ui.label({ text = card, fontSize = 12, fontWeight = "bold", color = "on_surface" }),
+            ui.label({ text = pciId, fontSize = 12, color = "on_surface_variant" }),
+            ui.label({ text = devId, fontSize = 12, color = "on_surface_variant" }),
+        }),
+        ui.label({
+            text = if statusData and statusData.available then "Hardware Ativo" else "Offline",
+            fontSize = 12,
+            fontWeight = "bold",
+            color = if statusData and statusData.available then "primary" else "error",
+        }),
+    })
+
+    return ui.column({ gap = 16, align = "stretch" }, {
+        gpuBlock,
+        tempBlock,
+        powerBlock,
+        vramBlock,
+        infoRow,
     })
 end
 
@@ -201,171 +165,171 @@ end
 local function colorView()
     local isEnabled = (localDevice.enabled == 1)
 
-    -- Master Enable Toggle Box
-    local masterBox = ui.box({
-        fill = "surface_container",
-        radius = 12,
-        paddingH = 16,
-        paddingV = 12,
-    }, {
-        ui.row({ align = "center", justify = "space_between" }, {
-            ui.column({ gap = 2 }, {
-                ui.label({ text = "Injeção de Hardware CTM & GAMMA_LUT", fontSize = 14, fontWeight = "bold" }),
-                ui.label({
-                    text = "Aplica calibragem de saturação, contraste e brilho direto no display controller",
-                    fontSize = 11,
-                    color = "on_surface_variant",
-                }),
+    -- 1. Master Enable Toggle Row
+    local masterRow = ui.row({ align = "center", justify = "space_between" }, {
+        ui.column({ gap = 2, flexGrow = 1 }, {
+            ui.label({ text = "Injeção de Hardware CTM & GAMMA_LUT", fontSize = 14, fontWeight = "bold" }),
+            ui.label({
+                text = "Aplica calibragem de saturação, contraste e brilho direto no display controller",
+                fontSize = 11,
+                color = "on_surface_variant",
             }),
-            ui.toggle({
-                checked = isEnabled,
-                onChange = "onToggleMaster",
-            }),
+        }),
+        ui.button({
+            text = if isEnabled then "Injeção: ATIVADA" else "Injeção: DESATIVADA",
+            glyph = if isEnabled then "check" else "x",
+            variant = if isEnabled then "primary" else "outline",
+            onClick = "onToggleMaster",
         }),
     })
 
-    -- Slider Row Helper
-    local function sliderCard(title, subtitle, value, minVal, maxVal, onChange, onDragEnd, onDec, onInc, onReset, defaultVal)
-        return ui.box({
-            fill = "surface_container",
-            radius = 12,
-            paddingH = 16,
-            paddingV = 12,
-        }, {
-            ui.column({ gap = 8, align = "stretch" }, {
-                ui.row({ align = "center", justify = "space_between" }, {
-                    ui.column({ gap = 2 }, {
-                        ui.label({ text = title, fontSize = 13, fontWeight = "bold" }),
-                        ui.label({ text = subtitle, fontSize = 11, color = "on_surface_variant" }),
-                    }),
-                    ui.row({ gap = 6, align = "center" }, {
-                        ui.label({ text = `{value}%`, fontSize = 14, fontWeight = "bold", color = "primary" }),
-                        ui.button({
-                            text = "-5",
-                            variant = "ghost",
-                            enabled = isEnabled and value > minVal,
-                            onClick = onDec,
-                        }),
-                        ui.button({
-                            text = "+5",
-                            variant = "ghost",
-                            enabled = isEnabled and value < maxVal,
-                            onClick = onInc,
-                        }),
-                        ui.button({
-                            glyph = "rotate",
-                            variant = "ghost",
-                            tooltip = `Restaurar padrão ({defaultVal}%)`,
-                            enabled = isEnabled and value ~= defaultVal,
-                            onClick = onReset,
-                        }),
-                    }),
+    -- 2. Precision Parameter Block Helper
+    local function parameterBlock(title, subtitle, value, minVal, maxVal, progressVal, onSub10, onSub1, onAdd1, onAdd10, onReset, defaultVal)
+        return ui.column({ gap = 6, align = "stretch" }, {
+            ui.row({ align = "center", justify = "space_between" }, {
+                ui.column({ gap = 2 }, {
+                    ui.label({ text = title, fontSize = 13, fontWeight = "bold" }),
+                    ui.label({ text = subtitle, fontSize = 11, color = "on_surface_variant" }),
                 }),
-                ui.slider({
-                    min = minVal,
-                    max = maxVal,
-                    step = 1,
-                    value = value,
-                    enabled = isEnabled,
-                    onChange = onChange,
-                    onDragEnd = onDragEnd,
+                ui.label({ text = `{value}%`, fontSize = 16, fontWeight = "bold", color = "primary" }),
+            }),
+            ui.progress({
+                height = 8,
+                radius = 4,
+                progress = progressVal,
+                fill = if isEnabled then "primary" else "on_surface_variant",
+            }),
+            ui.row({ gap = 6, align = "center" }, {
+                ui.button({
+                    text = "-10",
+                    variant = "ghost",
+                    enabled = isEnabled and value > minVal,
+                    onClick = onSub10,
                     flexGrow = 1,
+                }),
+                ui.button({
+                    text = "-1",
+                    variant = "ghost",
+                    enabled = isEnabled and value > minVal,
+                    onClick = onSub1,
+                    flexGrow = 1,
+                }),
+                ui.button({
+                    text = "+1",
+                    variant = "ghost",
+                    enabled = isEnabled and value < maxVal,
+                    onClick = onAdd1,
+                    flexGrow = 1,
+                }),
+                ui.button({
+                    text = "+10",
+                    variant = "ghost",
+                    enabled = isEnabled and value < maxVal,
+                    onClick = onAdd10,
+                    flexGrow = 1,
+                }),
+                ui.button({
+                    glyph = "rotate",
+                    text = `{defaultVal}%`,
+                    variant = "outline",
+                    tooltip = `Restaurar padrão ({defaultVal}%)`,
+                    enabled = isEnabled and value ~= defaultVal,
+                    onClick = onReset,
                 }),
             }),
         })
     end
 
-    local satCard = sliderCard(
+    local satProgress = clamp(localDevice.saturation / 400, 0, 1)
+    local satBlock = parameterBlock(
         "Saturação",
-        "Digital Vibrance em hardware Rec.709",
+        "Digital Vibrance em hardware Rec.709 (0..400%)",
         localDevice.saturation,
         0, 400,
-        "onSaturationChange",
-        "onSaturationDragEnd",
-        "onSaturationDec",
-        "onSaturationInc",
+        satProgress,
+        "onSaturationSub10",
+        "onSaturationSub1",
+        "onSaturationAdd1",
+        "onSaturationAdd10",
         "onSaturationReset",
         100
     )
 
-    local conCard = sliderCard(
+    local conProgress = clamp((localDevice.contrast - 10) / (300 - 10), 0, 1)
+    local conBlock = parameterBlock(
         "Contraste",
-        "Fator de contraste linear da matriz CTM",
+        "Fator de contraste linear da matriz CTM (10..300%)",
         localDevice.contrast,
         10, 300,
-        "onContrastChange",
-        "onContrastDragEnd",
-        "onContrastDec",
-        "onContrastInc",
+        conProgress,
+        "onContrastSub10",
+        "onContrastSub1",
+        "onContrastAdd1",
+        "onContrastAdd10",
         "onContrastReset",
         100
     )
 
-    local briCard = sliderCard(
+    local briProgress = clamp((localDevice.brightness + 100) / 200, 0, 1)
+    local briBlock = parameterBlock(
         "Brilho",
-        "Offset na curva GAMMA_LUT do hardware",
+        "Offset na curva GAMMA_LUT do hardware (-100..100%)",
         localDevice.brightness,
         -100, 100,
-        "onBrightnessChange",
-        "onBrightnessDragEnd",
-        "onBrightnessDec",
-        "onBrightnessInc",
+        briProgress,
+        "onBrightnessSub10",
+        "onBrightnessSub1",
+        "onBrightnessAdd1",
+        "onBrightnessAdd10",
         "onBrightnessReset",
         0
     )
 
-    -- Presets Rápidos
-    local presetsBox = ui.box({
-        fill = "surface_container",
-        radius = 12,
-        paddingH = 16,
-        paddingV = 12,
-    }, {
-        ui.column({ gap = 8, align = "stretch" }, {
-            ui.label({ text = "PRESETS RÁPIDOS", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
-            ui.row({ gap = 8, align = "center" }, {
-                ui.button({
-                    text = "Padrão",
-                    glyph = "rotate",
-                    variant = "outline",
-                    enabled = isEnabled,
-                    onClick = "onPresetStandard",
-                    flexGrow = 1,
-                }),
-                ui.button({
-                    text = "Competitivo",
-                    glyph = "device-gamepad-2",
-                    variant = "outline",
-                    enabled = isEnabled,
-                    onClick = "onPresetCompetitive",
-                    flexGrow = 1,
-                }),
-                ui.button({
-                    text = "Cinema",
-                    glyph = "movie",
-                    variant = "outline",
-                    enabled = isEnabled,
-                    onClick = "onPresetCinema",
-                    flexGrow = 1,
-                }),
-                ui.button({
-                    text = "Monocromático",
-                    glyph = "palette",
-                    variant = "outline",
-                    enabled = isEnabled,
-                    onClick = "onPresetMono",
-                    flexGrow = 1,
-                }),
+    -- 3. Presets Rápidos
+    local presetsBlock = ui.column({ gap = 8, align = "stretch" }, {
+        ui.label({ text = "PRESETS RÁPIDOS", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
+        ui.row({ gap = 8, align = "center" }, {
+            ui.button({
+                text = "Padrão",
+                glyph = "rotate",
+                variant = "outline",
+                enabled = isEnabled,
+                onClick = "onPresetStandard",
+                flexGrow = 1,
+            }),
+            ui.button({
+                text = "Competitivo",
+                glyph = "device-gamepad-2",
+                variant = "outline",
+                enabled = isEnabled,
+                onClick = "onPresetCompetitive",
+                flexGrow = 1,
+            }),
+            ui.button({
+                text = "Cinema",
+                glyph = "movie",
+                variant = "outline",
+                enabled = isEnabled,
+                onClick = "onPresetCinema",
+                flexGrow = 1,
+            }),
+            ui.button({
+                text = "Monocromático",
+                glyph = "palette",
+                variant = "outline",
+                enabled = isEnabled,
+                onClick = "onPresetMono",
+                flexGrow = 1,
             }),
         }),
     })
 
-    return ui.column({ gap = 10, align = "stretch" }, {
-        masterBox,
-        satCard,
-        conCard,
-        briCard,
-        presetsBox,
+    return ui.column({ gap = 16, align = "stretch" }, {
+        masterRow,
+        satBlock,
+        conBlock,
+        briBlock,
+        presetsBlock,
     })
 end
 
@@ -374,31 +338,24 @@ end
 local function profilesView()
     local profiles = if statusData and statusData.profiles then statusData.profiles else {}
 
-    -- Save Profile Box
-    local saveBox = ui.box({
-        fill = "surface_container",
-        radius = 12,
-        paddingH = 16,
-        paddingV = 12,
-    }, {
-        ui.column({ gap = 8, align = "stretch" }, {
-            ui.label({ text = "SALVAR ESTADO ATUAL", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
-            ui.row({ gap = 8, align = "center" }, {
-                ui.input({
-                    key = "profile_input",
-                    placeholder = "Nome do perfil (ex: gaming, movie)",
-                    value = newProfileName,
-                    flexGrow = 1,
-                    onChange = "onProfileNameChange",
-                    onSubmit = "onSaveProfileSubmit",
-                }),
-                ui.button({
-                    text = "Salvar",
-                    glyph = "device-floppy",
-                    variant = "primary",
-                    enabled = (newProfileName ~= ""),
-                    onClick = "onSaveProfileClicked",
-                }),
+    -- Save Profile Block
+    local saveBlock = ui.column({ gap = 8, align = "stretch" }, {
+        ui.label({ text = "SALVAR ESTADO ATUAL", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
+        ui.row({ gap = 8, align = "center" }, {
+            ui.input({
+                key = "profile_input",
+                placeholder = "Nome do perfil (ex: gaming, cinema)",
+                value = newProfileName,
+                flexGrow = 1,
+                onChange = "onProfileNameChange",
+                onSubmit = "onSaveProfileSubmit",
+            }),
+            ui.button({
+                text = "Salvar",
+                glyph = "device-floppy",
+                variant = "primary",
+                enabled = (newProfileName ~= ""),
+                onClick = "onSaveProfileClicked",
             }),
         }),
     })
@@ -406,17 +363,10 @@ local function profilesView()
     -- Profile List Items
     local profileRows = {}
     if #profiles == 0 then
-        table.insert(profileRows, ui.box({
-            fill = "surface_container",
-            radius = 12,
-            paddingH = 16,
-            paddingV = 16,
-        }, {
-            ui.label({
-                text = "Nenhum perfil salvo encontrado em ~/.config/prisma/profiles/",
-                color = "on_surface_variant",
-                fontSize = 12,
-            }),
+        table.insert(profileRows, ui.label({
+            text = "Nenhum perfil salvo encontrado em ~/.config/prisma/profiles/",
+            color = "on_surface_variant",
+            fontSize = 12,
         }))
     else
         for _, p in ipairs(profiles) do
@@ -433,40 +383,37 @@ local function profilesView()
                 sendCommand({ action = "profile_delete", name = name })
             end
 
-            table.insert(profileRows, ui.box({
-                key = `profile_{name}`,
-                fill = "surface_container",
-                radius = 12,
-                paddingH = 16,
-                paddingV = 10,
-            }, {
-                ui.row({ align = "center", justify = "space_between" }, {
-                    ui.column({ gap = 2 }, {
-                        ui.label({ text = name, fontSize = 14, fontWeight = "bold" }),
-                        ui.label({
-                            text = `Saturação: {sat}% | Contraste: {con}% | Brilho: {bri}%`,
-                            fontSize = 11,
-                            color = "on_surface_variant",
-                        }),
+            table.insert(profileRows, ui.row({ align = "center", justify = "space_between" }, {
+                ui.column({ gap = 2, flexGrow = 1 }, {
+                    ui.label({ text = name, fontSize = 14, fontWeight = "bold" }),
+                    ui.label({
+                        text = `Saturação: {sat}% | Contraste: {con}% | Brilho: {bri}%`,
+                        fontSize = 11,
+                        color = "on_surface_variant",
                     }),
-                    ui.row({ gap = 6, align = "center" }, {
-                        ui.button({
-                            text = "Aplicar",
-                            glyph = "check",
-                            variant = "primary",
-                            onClick = onApply,
-                        }),
-                        ui.button({
-                            glyph = "trash",
-                            variant = "destructive",
-                            tooltip = `Excluir perfil '{name}'`,
-                            onClick = onDelete,
-                        }),
+                }),
+                ui.row({ gap = 6, align = "center" }, {
+                    ui.button({
+                        text = "Aplicar",
+                        glyph = "check",
+                        variant = "primary",
+                        onClick = onApply,
+                    }),
+                    ui.button({
+                        glyph = "trash",
+                        variant = "destructive",
+                        tooltip = `Excluir perfil '{name}'`,
+                        onClick = onDelete,
                     }),
                 }),
             }))
         end
     end
+
+    local listBlock = ui.column({ gap = 8, align = "stretch" }, {
+        ui.label({ text = "PERFIS SALVOS", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
+        ui.column({ gap = 10, align = "stretch" }, profileRows),
+    })
 
     -- Profile Actions Footer
     local actionsRow = ui.row({ align = "center", justify = "space_between" }, {
@@ -484,9 +431,9 @@ local function profilesView()
         }),
     })
 
-    return ui.column({ gap = 12, align = "stretch" }, {
-        saveBox,
-        ui.column({ gap = 8, align = "stretch" }, profileRows),
+    return ui.column({ gap = 16, align = "stretch" }, {
+        saveBlock,
+        listBlock,
         actionsRow,
     })
 end
@@ -494,7 +441,7 @@ end
 -- ── Main Panel Render ────────────────────────────────────────────────────────
 
 render = function()
-    -- Sync local state with status if not actively dragging
+    -- Sync local state with status
     if statusData and statusData.device then
         local dev = statusData.device
         localDevice.enabled = if type(dev.enabled) == "number" then dev.enabled else 1
@@ -539,15 +486,8 @@ render = function()
     -- Error banner if present
     local banner = nil
     if statusData and type(statusData.error) == "string" and statusData.error ~= "" then
-        banner = ui.box({
-            fill = "surface_container",
-            border = "error",
-            borderWidth = 1,
-            radius = 10,
-            paddingH = 12,
-            paddingV = 8,
-        }, {
-            ui.label({ text = statusData.error, color = "error", fontSize = 11 }),
+        banner = ui.row({ gap = 8, align = "center" }, {
+            ui.label({ text = `! {statusData.error}`, color = "error", fontSize = 12 }),
         })
     end
 
@@ -593,33 +533,32 @@ function onCloseClicked()
     panel.close()
 end
 
-function onToggleMaster(checked)
-    localDevice.enabled = if checked then 1 else 0
+function onToggleMaster()
+    localDevice.enabled = if localDevice.enabled == 1 then 0 else 1
     sendColorUpdate(true)
     render()
 end
 
-function onSaturationChange(val)
-    local num = tonumber(val)
-    if num then
-        localDevice.saturation = clamp(math.floor(num + 0.5), 0, 400)
-        sendColorUpdate(false)
-        render()
-    end
-end
-
-function onSaturationDragEnd(_val)
-    sendColorUpdate(true)
-end
-
-function onSaturationDec()
-    localDevice.saturation = clamp(localDevice.saturation - 5, 0, 400)
+function onSaturationSub10()
+    localDevice.saturation = clamp(localDevice.saturation - 10, 0, 400)
     sendColorUpdate(true)
     render()
 end
 
-function onSaturationInc()
-    localDevice.saturation = clamp(localDevice.saturation + 5, 0, 400)
+function onSaturationSub1()
+    localDevice.saturation = clamp(localDevice.saturation - 1, 0, 400)
+    sendColorUpdate(true)
+    render()
+end
+
+function onSaturationAdd1()
+    localDevice.saturation = clamp(localDevice.saturation + 1, 0, 400)
+    sendColorUpdate(true)
+    render()
+end
+
+function onSaturationAdd10()
+    localDevice.saturation = clamp(localDevice.saturation + 10, 0, 400)
     sendColorUpdate(true)
     render()
 end
@@ -630,27 +569,26 @@ function onSaturationReset()
     render()
 end
 
-function onContrastChange(val)
-    local num = tonumber(val)
-    if num then
-        localDevice.contrast = clamp(math.floor(num + 0.5), 10, 300)
-        sendColorUpdate(false)
-        render()
-    end
-end
-
-function onContrastDragEnd(_val)
-    sendColorUpdate(true)
-end
-
-function onContrastDec()
-    localDevice.contrast = clamp(localDevice.contrast - 5, 10, 300)
+function onContrastSub10()
+    localDevice.contrast = clamp(localDevice.contrast - 10, 10, 300)
     sendColorUpdate(true)
     render()
 end
 
-function onContrastInc()
-    localDevice.contrast = clamp(localDevice.contrast + 5, 10, 300)
+function onContrastSub1()
+    localDevice.contrast = clamp(localDevice.contrast - 1, 10, 300)
+    sendColorUpdate(true)
+    render()
+end
+
+function onContrastAdd1()
+    localDevice.contrast = clamp(localDevice.contrast + 1, 10, 300)
+    sendColorUpdate(true)
+    render()
+end
+
+function onContrastAdd10()
+    localDevice.contrast = clamp(localDevice.contrast + 10, 10, 300)
     sendColorUpdate(true)
     render()
 end
@@ -661,27 +599,26 @@ function onContrastReset()
     render()
 end
 
-function onBrightnessChange(val)
-    local num = tonumber(val)
-    if num then
-        localDevice.brightness = clamp(math.floor(num + 0.5), -100, 100)
-        sendColorUpdate(false)
-        render()
-    end
-end
-
-function onBrightnessDragEnd(_val)
-    sendColorUpdate(true)
-end
-
-function onBrightnessDec()
-    localDevice.brightness = clamp(localDevice.brightness - 5, -100, 100)
+function onBrightnessSub10()
+    localDevice.brightness = clamp(localDevice.brightness - 10, -100, 100)
     sendColorUpdate(true)
     render()
 end
 
-function onBrightnessInc()
-    localDevice.brightness = clamp(localDevice.brightness + 5, -100, 100)
+function onBrightnessSub1()
+    localDevice.brightness = clamp(localDevice.brightness - 1, -100, 100)
+    sendColorUpdate(true)
+    render()
+end
+
+function onBrightnessAdd1()
+    localDevice.brightness = clamp(localDevice.brightness + 1, -100, 100)
+    sendColorUpdate(true)
+    render()
+end
+
+function onBrightnessAdd10()
+    localDevice.brightness = clamp(localDevice.brightness + 10, -100, 100)
     sendColorUpdate(true)
     render()
 end
