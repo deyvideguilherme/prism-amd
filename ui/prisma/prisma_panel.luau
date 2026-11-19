@@ -43,13 +43,24 @@ local function performanceView()
 
     local gpuBusy = if type(telem.gpu_busy_percent) == "number" then telem.gpu_busy_percent else 0
     local sclkMhz = if type(telem.sclk_mhz) == "number" then telem.sclk_mhz else 0
-    local tempJunc = if type(telem.temp_junction_c) == "number" then math.floor(telem.temp_junction_c + 0.5) else 0
+
+    local hasHotspot = (type(telem.temp_junction_c) == "number" and telem.temp_junction_c > 0)
+    local tempJunc = if hasHotspot then math.floor(telem.temp_junction_c + 0.5) else 0
     local tempEdge = if type(telem.temp_edge_c) == "number" then math.floor(telem.temp_edge_c + 0.5) else 0
+    local mainTemp = if hasHotspot then tempJunc else tempEdge
+    local tempCeiling = if hasHotspot then 110 else 95
+    local tempWarn = if hasHotspot then 85 else 80
+
+    local isApu = (telem.is_apu == true)
     local powerW = if type(telem.power_watts) == "number" then math.floor(telem.power_watts + 0.5) else 0
+    local powerMaxW = if isApu then 65 else 300
 
     local vramUsed = if type(telem.vram_used_mib) == "number" then telem.vram_used_mib else 0
     local vramTotal = if type(telem.vram_total_mib) == "number" and telem.vram_total_mib > 0 then telem.vram_total_mib else 1
     local vramRatio = clamp(vramUsed / vramTotal, 0, 1)
+
+    local gttUsed = if type(telem.gtt_used_mib) == "number" then telem.gtt_used_mib else 0
+    local gttTotal = if type(telem.gtt_total_mib) == "number" then telem.gtt_total_mib else 0
 
     local card = if type(telem.card) == "string" and telem.card ~= "" then telem.card else "AMD GPU"
     local pciId = if type(telem.pci_id) == "string" and telem.pci_id ~= "" then telem.pci_id else "AMD GPU"
@@ -74,71 +85,97 @@ local function performanceView()
     })
 
     -- 2. Temperatures Block (Hotspot & Edge)
+    local tempRightLabel = if hasHotspot then `Borda: {tempEdge}°C` else "Sensor Único (Borda)"
+    local tempSubtitle = if hasHotspot then "Temperatura interna máxima da GPU (Hotspot)" else "Temperatura do encapsulamento da APU (Edge)"
+    local tempFill = if mainTemp > tempWarn then "error" else "secondary"
+
     local tempBlock = ui.column({ gap = 4, align = "stretch" }, {
         ui.row({ align = "center", justify = "space_between" }, {
             ui.label({ text = "TEMPERATURA", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
-            ui.label({ text = `Borda: {tempEdge}°C`, fontSize = 12, color = "on_surface_variant" }),
+            ui.label({ text = tempRightLabel, fontSize = 12, color = "on_surface_variant" }),
         }),
         ui.row({ align = "baseline", gap = 6 }, {
             ui.label({
-                text = `{tempJunc}°C`,
+                text = `{mainTemp}°C`,
                 fontSize = 22,
                 fontWeight = "bold",
-                color = if tempJunc > 85 then "error" else "secondary",
+                color = tempFill,
             }),
-            ui.label({ text = "Temperatura interna máxima da GPU", fontSize = 11, color = "on_surface_variant" }),
+            ui.label({ text = tempSubtitle, fontSize = 11, color = "on_surface_variant" }),
         }),
         ui.progress({
             height = 8,
             radius = 4,
-            progress = clamp(tempJunc / 110, 0, 1),
-            fill = if tempJunc > 85 then "error" else "secondary",
+            progress = clamp(mainTemp / tempCeiling, 0, 1),
+            fill = tempFill,
         }),
     })
 
     -- 3. Power Consumption Block
+    local powerSubtitle = if isApu then "Potência elétrica do pacote APU (PPT)" else "Potência elétrica da placa"
+
     local powerBlock = ui.column({ gap = 4, align = "stretch" }, {
         ui.row({ align = "center", justify = "space_between" }, {
             ui.label({ text = "CONSUMO DE ENERGIA", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
+            ui.label({ text = `Teto: {powerMaxW} W`, fontSize = 12, color = "on_surface_variant" }),
         }),
         ui.row({ align = "baseline", gap = 6 }, {
             ui.label({ text = `{powerW} W`, fontSize = 22, fontWeight = "bold", color = "on_surface" }),
-            ui.label({ text = "Potência elétrica da placa", fontSize = 11, color = "on_surface_variant" }),
+            ui.label({ text = powerSubtitle, fontSize = 11, color = "on_surface_variant" }),
         }),
         ui.progress({
             height = 8,
             radius = 4,
-            progress = clamp(powerW / 300, 0, 1),
+            progress = clamp(powerW / powerMaxW, 0, 1),
             fill = "primary",
         }),
     })
 
-    -- 4. VRAM Allocation Block
+    -- 4. VRAM / Graphics Memory Allocation Block
+    local vramTitle = "MEMÓRIA VRAM"
+    local vramRightLabel = `{string.format("%.1f", vramUsed / 1024)} / {string.format("%.1f", vramTotal / 1024)} GiB`
+    local vramPercent = `{math.floor(vramRatio * 100 + 0.5)}%`
+    local vramSubtitle = `{math.floor(vramUsed)} MiB alocados`
+    local vramProgressVal = vramRatio
+
+    if isApu and gttTotal > 0 then
+        vramTitle = "MEMÓRIA GRÁFICA (VRAM + GTT)"
+        local combinedUsed = vramUsed + gttUsed
+        local combinedTotal = vramTotal + gttTotal
+        local memRatio = clamp(combinedUsed / combinedTotal, 0, 1)
+
+        vramRightLabel = `{string.format("%.1f", combinedUsed / 1024)} / {string.format("%.1f", combinedTotal / 1024)} GiB`
+        vramPercent = `{math.floor(memRatio * 100 + 0.5)}%`
+        vramSubtitle = `{math.floor(vramUsed)}/{math.floor(vramTotal)} MiB VRAM + {math.floor(gttUsed)} MiB GTT`
+        vramProgressVal = memRatio
+    end
+
     local vramBlock = ui.column({ gap = 4, align = "stretch" }, {
         ui.row({ align = "center", justify = "space_between" }, {
-            ui.label({ text = "MEMÓRIA VRAM", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
+            ui.label({ text = vramTitle, fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
             ui.label({
-                text = `{string.format("%.1f", vramUsed / 1024)} / {string.format("%.1f", vramTotal / 1024)} GiB`,
+                text = vramRightLabel,
                 fontSize = 12,
                 color = "on_surface_variant",
             }),
         }),
         ui.row({ align = "baseline", gap = 6 }, {
-            ui.label({ text = `{math.floor(vramRatio * 100 + 0.5)}%`, fontSize = 22, fontWeight = "bold", color = "primary" }),
-            ui.label({ text = `{math.floor(vramUsed)} MiB alocados`, fontSize = 11, color = "on_surface_variant" }),
+            ui.label({ text = vramPercent, fontSize = 22, fontWeight = "bold", color = "primary" }),
+            ui.label({ text = vramSubtitle, fontSize = 11, color = "on_surface_variant" }),
         }),
         ui.progress({
             height = 8,
             radius = 4,
-            progress = vramRatio,
+            progress = vramProgressVal,
             fill = "primary",
         }),
     })
 
     -- Hardware Identity Footer Row
+    local cardDisplay = `{card} ({if isApu then "APU" else "dGPU"})`
     local infoRow = ui.row({ align = "center", justify = "space_between" }, {
         ui.row({ gap = 12, align = "center" }, {
-            ui.label({ text = card, fontSize = 12, fontWeight = "bold", color = "on_surface" }),
+            ui.label({ text = cardDisplay, fontSize = 12, fontWeight = "bold", color = "on_surface" }),
             ui.label({ text = pciId, fontSize = 12, color = "on_surface_variant" }),
             ui.label({ text = devId, fontSize = 12, color = "on_surface_variant" }),
         }),
