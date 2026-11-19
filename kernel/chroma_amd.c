@@ -198,6 +198,8 @@ static int chroma_update_crtc(struct drm_crtc *crtc,
 	struct drm_property_blob *candidate;
 	struct drm_crtc_state *new_state;
 	struct chroma_atomic_state *state;
+	bool allow_modeset = false;
+	bool is_transition;
 	int ret;
 
 	drm_modeset_acquire_init(&ctx, 0);
@@ -218,13 +220,16 @@ static int chroma_update_crtc(struct drm_crtc *crtc,
 			break;
 		}
 
+		is_transition = (!*owned || !target);
+
+commit_state:
 		state = chroma_atomic_alloc(crtc->dev);
 		if (!state) {
 			ret = -ENOMEM;
 			break;
 		}
 		state->acquire_ctx = &ctx;
-		state->allow_modeset = false;
+		state->allow_modeset = allow_modeset;
 		candidate = NULL;
 		new_state = drm_atomic_get_crtc_state(state, crtc);
 		if (IS_ERR(new_state)) {
@@ -243,9 +248,22 @@ static int chroma_update_crtc(struct drm_crtc *crtc,
 		ret = drm_atomic_commit(state);
 		if (!ret) {
 			drm_property_replace_blob(owned, candidate);
-			pr_debug("chroma_amd: %s CRTC %u CTM blob %u\n",
-				 dev_name(crtc->dev->dev), crtc->base.id,
-				 candidate ? candidate->base.id : 0);
+			if (allow_modeset) {
+				pr_debug("chroma_amd: %s CRTC %u CTM blob %u (fallback allow_modeset=true confirmed)\n",
+					 dev_name(crtc->dev->dev), crtc->base.id,
+					 candidate ? candidate->base.id : 0);
+			} else {
+				pr_debug("chroma_amd: %s CRTC %u CTM blob %u\n",
+					 dev_name(crtc->dev->dev), crtc->base.id,
+					 candidate ? candidate->base.id : 0);
+			}
+		} else if (ret == -EINVAL && !allow_modeset && is_transition) {
+			pr_debug("chroma_amd: %s CRTC %u fast commit failed (-EINVAL), retrying with allow_modeset=true\n",
+				 dev_name(crtc->dev->dev), crtc->base.id);
+			drm_property_blob_put(candidate);
+			chroma_atomic_put(state);
+			allow_modeset = true;
+			goto commit_state;
 		}
 		drm_property_blob_put(candidate);
 put_state:
