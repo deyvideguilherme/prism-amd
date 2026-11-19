@@ -3,6 +3,7 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <vector>
 #include <iomanip>
 #include <cctype>
 
@@ -53,17 +54,26 @@ bool iequals(std::string_view a, std::string_view b) {
     return true;
 }
 
+struct AmdCandidate {
+    std::filesystem::path device_dir;
+    std::string card_name;
+    int score = 0;
+};
+
 } // namespace
 
 std::optional<std::filesystem::path> find_amd_gpu_path(const std::filesystem::path& drm_root) {
-    if (!std::filesystem::exists(drm_root)) {
+    std::error_code ec;
+    if (!std::filesystem::exists(drm_root, ec)) {
         return std::nullopt;
     }
 
+    std::vector<AmdCandidate> candidates;
+
     // Inspect entries named card0, card1, etc.
-    for (const auto& entry : std::filesystem::directory_iterator(drm_root)) {
+    for (const auto& entry : std::filesystem::directory_iterator(drm_root, ec)) {
         std::string filename = entry.path().filename().string();
-        // Match card[0-9]+ without connector suffixes (e.g. card1-DP-1)
+        // Match card[0-9]+ without connector suffixes (e.g. card1, not card1-DP-1)
         if (!filename.starts_with("card") || filename.find('-') != std::string::npos) {
             continue;
         }
@@ -72,12 +82,71 @@ std::optional<std::filesystem::path> find_amd_gpu_path(const std::filesystem::pa
         std::filesystem::path vendor_file = device_dir / "vendor";
 
         auto vendor_str = read_file_string(vendor_file);
-        if (vendor_str && (*vendor_str == "0x1002" || *vendor_str == "1002")) {
-            return device_dir;
+        bool is_amd_vendor = vendor_str && (*vendor_str == "0x1002" || *vendor_str == "1002");
+
+        // Check if driver symlink points to amdgpu
+        bool is_amdgpu_driver = false;
+        std::filesystem::path driver_symlink = device_dir / "driver";
+        if (std::filesystem::exists(driver_symlink, ec)) {
+            auto target = std::filesystem::canonical(driver_symlink, ec);
+            if (!ec && target.filename() == "amdgpu") {
+                is_amdgpu_driver = true;
+            }
         }
+
+        if (!is_amd_vendor && !is_amdgpu_driver) {
+            continue;
+        }
+
+        AmdCandidate cand;
+        cand.device_dir = device_dir;
+        cand.card_name = filename;
+        cand.score = 10;
+
+        if (is_amd_vendor) cand.score += 5;
+        if (is_amdgpu_driver) cand.score += 20;
+
+        // Check for active hwmon sensors
+        std::filesystem::path hwmon_dir = device_dir / "hwmon";
+        if (std::filesystem::exists(hwmon_dir, ec) && !std::filesystem::is_empty(hwmon_dir, ec)) {
+            cand.score += 10;
+        }
+        if (std::filesystem::exists(device_dir / "gpu_busy_percent", ec)) {
+            cand.score += 10;
+        }
+
+        // Check for connected display connectors (e.g. card1-DP-1, card0-eDP-1)
+        std::string prefix = filename + "-";
+        for (const auto& conn : std::filesystem::directory_iterator(drm_root, ec)) {
+            std::string conn_name = conn.path().filename().string();
+            if (conn_name.starts_with(prefix)) {
+                std::filesystem::path status_file = conn.path() / "status";
+                auto status_str = read_file_string(status_file);
+                if (status_str) {
+                    std::string st = *status_str;
+                    while (!st.empty() && (st.back() == '\n' || st.back() == '\r' || st.back() == ' '))
+                        st.pop_back();
+                    if (st == "connected") {
+                        cand.score += 100;
+                        break;
+                    }
+                }
+            }
+        }
+
+        candidates.push_back(cand);
     }
 
-    return std::nullopt;
+    if (candidates.empty()) {
+        return std::nullopt;
+    }
+
+    // Sort descending by score (connected displays & active sensors first)
+    std::sort(candidates.begin(), candidates.end(), [](const AmdCandidate& a, const AmdCandidate& b) {
+        return a.score > b.score;
+    });
+
+    return candidates.front().device_dir;
 }
 
 std::optional<int> parse_sclk_mhz(std::string_view sclk_content) {

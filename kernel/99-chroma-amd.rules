@@ -1,2 +1,2 @@
-# Native devtmpfs rule for /dev/chroma_amd
-KERNEL=="chroma_amd", SUBSYSTEM=="misc", GROUP="video", MODE="0660"
+# Native devtmpfs rule for /dev/chroma_amd with local user access
+KERNEL=="chroma_amd", SUBSYSTEM=="misc", GROUP="video", MODE="0660", TAG+="uaccess"

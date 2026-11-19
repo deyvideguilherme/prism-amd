@@ -1,0 +1,20 @@
+post_install() {
+    cat << 'EOF'
+:: Prisma Control Center instalado com sucesso.
+::
+:: O modulo de kernel chroma_amd foi registrado no DKMS e sera compilado
+:: automaticamente para os kernels instalados.
+::
+:: Para carregar o modulo imediatamente na sessao atual:
+::   sudo modprobe chroma_amd
+::
+:: Para habilitar o plugin no Noctalia Shell (Niri):
+::   noctalia msg plugins source add deyvideguilherme path /usr/share/prisma-control-center/ui
+::   noctalia msg plugins update deyvideguilherme
+::   noctalia msg plugins enable deyvideguilherme/prisma
+EOF
+}
+
+post_upgrade() {
+    post_install
+}

@@ -1,0 +1,18 @@
+pkgbase = prisma-control-center
+	pkgdesc = Hardware display color calibration and telemetry for AMD GPUs on Noctalia Shell (Niri / Wayland)
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/deyvideguilherme/chroma-layer
+	install = prisma-control-center.install
+	arch = x86_64
+	license = MIT
+	makedepends = cmake
+	makedepends = make
+	depends = dkms
+	depends = libdrm
+	optdepends = noctalia-shell: for the desktop control center visual plugin
+	provides = chroma-amd-dkms
+	provides = prisma-ctl
+	conflicts = chroma-amd-dkms
+
+pkgname = prisma-control-center

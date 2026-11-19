@@ -23,7 +23,7 @@ local deviceState = {
     brightness = 0,
 }
 local telemetryState = {
-    card = "card1",
+    card = "",
     pci_id = "",
     device_id = "",
     gpu_busy_percent = 0,
@@ -139,7 +139,7 @@ local function pollStatus(onComplete)
                 -- Safely parse hardware telemetry handling nulls
                 local telem = parsed.telemetry
                 if type(telem) == "table" then
-                    telemetryState.card = if type(telem.card) == "string" then telem.card else "card1"
+                    telemetryState.card = if type(telem.card) == "string" and telem.card ~= "" then telem.card else "amdgpu"
                     telemetryState.pci_id = if type(telem.pci_id) == "string" then telem.pci_id else ""
                     telemetryState.device_id = if type(telem.device_id) == "string" then telem.device_id else ""
                     telemetryState.gpu_busy_percent = if type(telem.gpu_busy_percent) == "number" then telem.gpu_busy_percent else 0

@@ -24,7 +24,32 @@ A suíte é composta por três componentes:
 
 ## 3. Compilação e Instalação
 
-### Compilação do Módulo de Kernel
+### Instalação Recomendada no Arch Linux / CachyOS (DKMS)
+
+O repositório fornece empacotamento completo com suporte a DKMS para Arch Linux, CachyOS e distribuições derivadas. O pacote compila a CLI, instala as regras de permissão udev, configura o carregamento automático do módulo e registra o código-fonte no DKMS para reconstrução automática a cada atualização de kernel.
+
+Para compilar e instalar o pacote:
+
+```bash
+cd packaging/arch
+makepkg -si
+```
+
+O suporte a GPUs abrange tanto placas dedicadas (Radeon RX) quanto processadores com vídeo integrado (APUs Ryzen), identificando dinamicamente a GPU ativa através da enumeração de `/sys/class/drm/` e conectores com display ativo, sem necessidade de configuração manual de índices (`card0` ou `card1`).
+
+Após a instalação do pacote, habilite o plugin no Noctalia Shell:
+
+```bash
+noctalia msg plugins source add deyvideguilherme path /usr/share/prisma-control-center/ui
+noctalia msg plugins update deyvideguilherme
+noctalia msg plugins enable deyvideguilherme/prisma
+```
+
+### Instalação Manual para Desenvolvimento
+
+Caso prefira compilar os componentes individualmente sem utilizar o gerenciador de pacotes:
+
+#### 1. Compilação do Módulo de Kernel
 
 ```bash
 cd kernel
@@ -33,7 +58,7 @@ make
 
 *Nota: Em sistemas CachyOS compilados com Clang/LLVM, o Makefile detecta automaticamente `CONFIG_CC_IS_CLANG=y` e ativa `LLVM=1`.*
 
-### Compilação da CLI
+#### 2. Compilação da CLI
 
 A partir da raiz do repositório:
 
@@ -51,7 +76,9 @@ Para permitir que o serviço do Noctalia Shell valide e execute a CLI em qualque
 sudo ln -sf ~/.local/bin/prisma-ctl /usr/local/bin/prisma-ctl
 ```
 
-## 4. Configuração do Módulo e Permissões
+## 4. Configuração do Módulo e Permissões (Instalação Manual)
+
+Se você instalou via pacote `PKGBUILD`, as permissões udev e o carregamento no boot já foram configurados automaticamente. Para instalações manuais:
 
 ### Carregamento Temporário
 
@@ -77,21 +104,18 @@ sudo make unload
 
 ### Acesso sem Root (Regra udev)
 
-Por padrão, `/dev/chroma_amd` é criado com permissões `0660` para o grupo `video`. Instale a regra udev e adicione o seu usuário ao grupo:
+Instale a regra udev para conceder acesso local via `uaccess` e grupo `video`:
 
 ```bash
 cd kernel
 sudo make install-udev
-sudo usermod -aG video $USER
 ```
-
-*Nota: Reinicie a sessão de login para que a alteração de grupo tenha efeito no shell do usuário.*
 
 ### Carga Automática no Boot
 
 Para carregar o módulo automaticamente a cada inicialização do sistema:
 
-1. Copie o binário do módulo compilado para a árvore de módulos extras do kernel:
+1. Copie o binário compilado para a árvore de módulos do kernel:
 ```bash
 sudo install -Dm644 kernel/chroma_amd.ko /lib/modules/$(uname -r)/extra/chroma_amd.ko
 sudo depmod -a
@@ -102,20 +126,20 @@ sudo depmod -a
 echo "chroma_amd" | sudo tee /etc/modules-load.d/chroma_amd.conf
 ```
 
-#### Suporte a DKMS (Opcional)
+#### Suporte Manual a DKMS
 
-Para reconstrução automática em atualizações de kernel:
+Para registrar o módulo manualmente no DKMS:
 
 ```bash
-sudo cp -r kernel /usr/src/prism-amd-0.1.0
-sudo dkms add -m prism-amd -v 0.1.0
-sudo dkms build -m prism-amd -v 0.1.0
-sudo dkms install -m prism-amd -v 0.1.0
+sudo cp -r kernel /usr/src/chroma-amd-0.1.0
+sudo dkms add -m chroma-amd -v 0.1.0
+sudo dkms build -m chroma-amd -v 0.1.0
+sudo dkms install -m chroma-amd -v 0.1.0
 ```
 
-## 5. Instalação no Noctalia Shell
+## 5. Instalação Manual no Noctalia Shell
 
-O plugin gráfico pode ser instalado via CMake ou registrado como fonte local de desenvolvimento:
+Se você não utilizou o pacote Arch Linux, o plugin pode ser instalado via CMake ou registrado como fonte local:
 
 ### Opção A: Instalação Materializada via CMake (Recomendada)
 

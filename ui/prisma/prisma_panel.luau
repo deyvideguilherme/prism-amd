@@ -51,7 +51,7 @@ local function performanceView()
     local vramTotal = if type(telem.vram_total_mib) == "number" and telem.vram_total_mib > 0 then telem.vram_total_mib else 1
     local vramRatio = clamp(vramUsed / vramTotal, 0, 1)
 
-    local card = if type(telem.card) == "string" and telem.card ~= "" then telem.card else "card1"
+    local card = if type(telem.card) == "string" and telem.card ~= "" then telem.card else "AMD GPU"
     local pciId = if type(telem.pci_id) == "string" and telem.pci_id ~= "" then telem.pci_id else "AMD GPU"
     local devId = if type(telem.device_id) == "string" and telem.device_id ~= "" then telem.device_id else "DCN"
 

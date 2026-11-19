@@ -1,0 +1,66 @@
+# Maintainer: Deyvide Guilherme <deyvide.roza@gmail.com>
+
+pkgname=prisma-control-center
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Hardware display color calibration and telemetry for AMD GPUs on Noctalia Shell (Niri / Wayland)"
+arch=('x86_64')
+url="https://github.com/deyvideguilherme/chroma-layer"
+license=('MIT')
+depends=('dkms' 'libdrm')
+makedepends=('cmake' 'make')
+optdepends=(
+    'noctalia-shell: for the desktop control center visual plugin'
+)
+provides=('chroma-amd-dkms' 'prisma-ctl')
+conflicts=('chroma-amd-dkms')
+install=prisma-control-center.install
+source=()
+sha256sums=()
+
+_get_project_root() {
+    if [ -f "$startdir/../../CMakeLists.txt" ]; then
+        echo "$startdir/../.."
+    elif [ -f "$PWD/../../CMakeLists.txt" ]; then
+        echo "$PWD/../.."
+    else
+        echo "."
+    fi
+}
+
+build() {
+    local _root
+    _root="$(_get_project_root)"
+
+    cmake -B "$srcdir/build" -S "$_root" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr
+    cmake --build "$srcdir/build" --target prisma-ctl
+}
+
+package() {
+    local _root
+    _root="$(_get_project_root)"
+
+    # 1. CLI binary
+    install -Dm755 "$srcdir/build/prisma-ctl" "$pkgdir/usr/bin/prisma-ctl"
+
+    # 2. DKMS module source
+    local _dkms_dir="$pkgdir/usr/src/chroma-amd-$pkgver"
+    install -dm755 "$_dkms_dir"
+    install -m644 "$_root/kernel/chroma_amd.c" "$_dkms_dir/"
+    install -m644 "$_root/kernel/Makefile" "$_dkms_dir/"
+    install -m644 "$_root/kernel/dkms.conf" "$_dkms_dir/"
+
+    # 3. Automatic module load at boot
+    install -dm755 "$pkgdir/usr/lib/modules-load.d"
+    echo "chroma_amd" > "$pkgdir/usr/lib/modules-load.d/chroma-amd.conf"
+
+    # 4. Udev rule for unprivileged access (/dev/chroma_amd)
+    install -Dm644 "$_root/kernel/99-chroma-amd.rules" "$pkgdir/usr/lib/udev/rules.d/99-chroma-amd.rules"
+
+    # 5. Noctalia Shell plugin files
+    local _ui_dir="$pkgdir/usr/share/prisma-control-center/ui/prisma"
+    install -dm755 "$_ui_dir"
+    cp -r "$_root/ui/prisma/"* "$_ui_dir/"
+}
