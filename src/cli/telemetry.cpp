@@ -6,6 +6,7 @@
 #include <vector>
 #include <iomanip>
 #include <cctype>
+#include <charconv>
 
 namespace prisma {
 
@@ -25,24 +26,16 @@ std::optional<std::string> read_file_string(const std::filesystem::path& path) {
     return trim(content);
 }
 
-std::optional<uint64_t> read_file_u64(const std::filesystem::path& path) {
-    auto content = read_file_string(path);
-    if (!content) return std::nullopt;
-    try {
-        return std::stoull(*content);
-    } catch (...) {
-        return std::nullopt;
-    }
-}
+template<typename Integer>
+std::optional<Integer> read_file_number(const std::filesystem::path& path) {
+    const auto content = read_file_string(path);
+    if (!content || content->empty()) return std::nullopt;
 
-std::optional<int64_t> read_file_s64(const std::filesystem::path& path) {
-    auto content = read_file_string(path);
-    if (!content) return std::nullopt;
-    try {
-        return std::stoll(*content);
-    } catch (...) {
-        return std::nullopt;
-    }
+    Integer value;
+    const auto end = content->data() + content->size();
+    const auto [ptr, ec] = std::from_chars(content->data(), end, value);
+    if (ec != std::errc() || ptr != end) return std::nullopt;
+    return value;
 }
 
 bool iequals(std::string_view a, std::string_view b) {
@@ -60,25 +53,52 @@ struct AmdCandidate {
     int score = 0;
 };
 
+std::vector<std::filesystem::path> read_directory(const std::filesystem::path& directory) {
+    std::vector<std::filesystem::path> result;
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(directory, ec), end; it != end && !ec; it.increment(ec)) {
+        result.push_back(it->path());
+    }
+    std::ranges::sort(result);
+    return result;
+}
+
+std::string json_string(std::string_view value) {
+    if (value.empty()) return "null";
+
+    std::string result = "\"";
+    constexpr std::string_view hex = "0123456789abcdef";
+    for (unsigned char ch : value) {
+        if (ch < 0x20) {
+            result += "\\u00";
+            result += hex[ch >> 4];
+            result += hex[ch & 0x0f];
+        } else {
+            if (ch == '"' || ch == '\\') result += '\\';
+            result += static_cast<char>(ch);
+        }
+    }
+    return result + '"';
+}
+
 } // namespace
 
 std::optional<std::filesystem::path> find_amd_gpu_path(const std::filesystem::path& drm_root) {
     std::error_code ec;
-    if (!std::filesystem::exists(drm_root, ec)) {
-        return std::nullopt;
-    }
+    const auto entries = read_directory(drm_root);
 
     std::vector<AmdCandidate> candidates;
 
     // Inspect entries named card0, card1, etc.
-    for (const auto& entry : std::filesystem::directory_iterator(drm_root, ec)) {
-        std::string filename = entry.path().filename().string();
+    for (const auto& entry : entries) {
+        const std::string filename = entry.filename().string();
         // Match card[0-9]+ without connector suffixes (e.g. card1, not card1-DP-1)
-        if (!filename.starts_with("card") || filename.find('-') != std::string::npos) {
+        if (!filename.starts_with("card") || filename.size() == 4 ||
+            filename.find_first_not_of("0123456789", 4) != std::string::npos) {
             continue;
         }
 
-        std::filesystem::path device_dir = entry.path() / "device";
+        std::filesystem::path device_dir = entry / "device";
         std::filesystem::path vendor_file = device_dir / "vendor";
 
         auto vendor_str = read_file_string(vendor_file);
@@ -108,7 +128,7 @@ std::optional<std::filesystem::path> find_amd_gpu_path(const std::filesystem::pa
 
         // Check for active hwmon sensors
         std::filesystem::path hwmon_dir = device_dir / "hwmon";
-        if (std::filesystem::exists(hwmon_dir, ec) && !std::filesystem::is_empty(hwmon_dir, ec)) {
+        if (!read_directory(hwmon_dir).empty()) {
             cand.score += 10;
         }
         if (std::filesystem::exists(device_dir / "gpu_busy_percent", ec)) {
@@ -117,20 +137,11 @@ std::optional<std::filesystem::path> find_amd_gpu_path(const std::filesystem::pa
 
         // Check for connected display connectors (e.g. card1-DP-1, card0-eDP-1)
         std::string prefix = filename + "-";
-        for (const auto& conn : std::filesystem::directory_iterator(drm_root, ec)) {
-            std::string conn_name = conn.path().filename().string();
-            if (conn_name.starts_with(prefix)) {
-                std::filesystem::path status_file = conn.path() / "status";
-                auto status_str = read_file_string(status_file);
-                if (status_str) {
-                    std::string st = *status_str;
-                    while (!st.empty() && (st.back() == '\n' || st.back() == '\r' || st.back() == ' '))
-                        st.pop_back();
-                    if (st == "connected") {
-                        cand.score += 100;
-                        break;
-                    }
-                }
+        for (const auto& conn : entries) {
+            if (conn.filename().string().starts_with(prefix) &&
+                read_file_string(conn / "status") == "connected") {
+                cand.score += 100;
+                break;
             }
         }
 
@@ -143,7 +154,8 @@ std::optional<std::filesystem::path> find_amd_gpu_path(const std::filesystem::pa
 
     // Sort descending by score (connected displays & active sensors first)
     std::sort(candidates.begin(), candidates.end(), [](const AmdCandidate& a, const AmdCandidate& b) {
-        return a.score > b.score;
+        if (a.score != b.score) return a.score > b.score;
+        return a.card_name < b.card_name;
     });
 
     return candidates.front().device_dir;
@@ -224,15 +236,15 @@ GpuTelemetry read_gpu_telemetry(const std::filesystem::path& drm_root) {
     }
 
     // GPU Busy %
-    if (auto busy = read_file_s64(dev_path / "gpu_busy_percent")) {
-        telem.gpu_busy_percent = static_cast<int>(*busy);
+    if (auto busy = read_file_number<int>(dev_path / "gpu_busy_percent")) {
+        telem.gpu_busy_percent = *busy;
     }
 
     // VRAM Info (bytes -> MiB)
-    if (auto v_used = read_file_u64(dev_path / "mem_info_vram_used")) {
+    if (auto v_used = read_file_number<uint64_t>(dev_path / "mem_info_vram_used")) {
         telem.vram_used_mib = static_cast<double>(*v_used) / (1024.0 * 1024.0);
     }
-    if (auto v_total = read_file_u64(dev_path / "mem_info_vram_total")) {
+    if (auto v_total = read_file_number<uint64_t>(dev_path / "mem_info_vram_total")) {
         telem.vram_total_mib = static_cast<double>(*v_total) / (1024.0 * 1024.0);
     }
 
@@ -243,50 +255,44 @@ GpuTelemetry read_gpu_telemetry(const std::filesystem::path& drm_root) {
 
     // HWMON directory discovery
     std::filesystem::path hwmon_dir = dev_path / "hwmon";
-    if (std::filesystem::exists(hwmon_dir)) {
-        for (const auto& entry : std::filesystem::directory_iterator(hwmon_dir)) {
-            if (!entry.path().filename().string().starts_with("hwmon")) {
-                continue;
-            }
-
-            std::filesystem::path hw = entry.path();
-
-            // Read temperatures (temp*_label + temp*_input)
-            for (int i = 1; i <= 8; ++i) {
-                std::string prefix = "temp" + std::to_string(i);
-                std::filesystem::path label_file = hw / (prefix + "_label");
-                std::filesystem::path input_file = hw / (prefix + "_input");
-
-                if (!std::filesystem::exists(input_file)) {
-                    continue;
-                }
-
-                auto temp_raw = read_file_s64(input_file);
-                if (!temp_raw) continue;
-                double temp_c = static_cast<double>(*temp_raw) / 1000.0;
-
-                auto label_str = read_file_string(label_file);
-                std::string label = label_str ? *label_str : "";
-
-                if (iequals(label, "edge") || (label.empty() && i == 1 && !telem.temp_edge_c)) {
-                    telem.temp_edge_c = temp_c;
-                } else if (iequals(label, "junction") || iequals(label, "hotspot")) {
-                    telem.temp_junction_c = temp_c;
-                }
-            }
-
-            // Power (Watts)
-            std::filesystem::path p_avg = hw / "power1_average";
-            std::filesystem::path p_in = hw / "power1_input";
-
-            if (auto p_val = read_file_u64(p_avg)) {
-                telem.power_watts = static_cast<double>(*p_val) / 1000000.0;
-            } else if (auto p_in_val = read_file_u64(p_in)) {
-                telem.power_watts = static_cast<double>(*p_in_val) / 1000000.0;
-            }
-
-            break; // Process primary hwmon
+    for (const auto& entry : read_directory(hwmon_dir)) {
+        if (!entry.filename().string().starts_with("hwmon")) {
+            continue;
         }
+
+        const auto& hw = entry;
+
+        // Read temperatures (temp*_label + temp*_input)
+        for (int i = 1; i <= 8; ++i) {
+            std::string prefix = "temp" + std::to_string(i);
+            std::filesystem::path label_file = hw / (prefix + "_label");
+            std::filesystem::path input_file = hw / (prefix + "_input");
+
+            auto temp_raw = read_file_number<int64_t>(input_file);
+            if (!temp_raw) continue;
+            double temp_c = static_cast<double>(*temp_raw) / 1000.0;
+
+            auto label_str = read_file_string(label_file);
+            std::string label = label_str ? *label_str : "";
+
+            if (iequals(label, "edge") || (label.empty() && i == 1 && !telem.temp_edge_c)) {
+                telem.temp_edge_c = temp_c;
+            } else if (iequals(label, "junction") || iequals(label, "hotspot")) {
+                telem.temp_junction_c = temp_c;
+            }
+        }
+
+        // Power (Watts)
+        std::filesystem::path p_avg = hw / "power1_average";
+        std::filesystem::path p_in = hw / "power1_input";
+
+        if (auto p_val = read_file_number<uint64_t>(p_avg)) {
+            telem.power_watts = static_cast<double>(*p_val) / 1000000.0;
+        } else if (auto p_in_val = read_file_number<uint64_t>(p_in)) {
+            telem.power_watts = static_cast<double>(*p_in_val) / 1000000.0;
+        }
+
+        break; // Process primary hwmon
     }
 
     return telem;
@@ -342,9 +348,9 @@ std::string format_telemetry_json(const GpuTelemetry& t) {
     ss << std::fixed << std::setprecision(1);
 
     ss << "{\n";
-    ss << "  \"card\": " << (t.card_name.empty() ? "null" : ("\"" + t.card_name + "\"")) << ",\n";
-    ss << "  \"pci_id\": " << (t.pci_id.empty() ? "null" : ("\"" + t.pci_id + "\"")) << ",\n";
-    ss << "  \"device_id\": " << (t.device_id.empty() ? "null" : ("\"" + t.device_id + "\"")) << ",\n";
+    ss << "  \"card\": " << json_string(t.card_name) << ",\n";
+    ss << "  \"pci_id\": " << json_string(t.pci_id) << ",\n";
+    ss << "  \"device_id\": " << json_string(t.device_id) << ",\n";
 
     ss << "  \"gpu_busy_percent\": ";
     if (t.gpu_busy_percent) ss << *t.gpu_busy_percent;

@@ -1,53 +1,46 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * chroma_amd.c - Linux Kernel Module for AMDGPU Hardware Color Acceleration (prism-amd)
- *
- * Injects Rec.709 Color Transformation Matrices (CTM) directly into
- * the AMD Display Core Next (DCN) hardware pipeline by intercepting DRM atomic commits via kprobe.
- *
- * Device node: /dev/chroma_amd (character miscdevice, mode 0660, group video)
- * Telemetry:   /sys/kernel/chroma_amd/ (read-only mode 0444)
- */
 
-#include <linux/module.h>
-#include <linux/kernel.h>
-#include <linux/init.h>
-#include <linux/kobject.h>
-#include <linux/sysfs.h>
+#include <linux/compat.h>
 #include <linux/fs.h>
-#include <linux/miscdevice.h>
-#include <linux/uaccess.h>
-#include <linux/string.h>
-#include <linux/atomic.h>
-#include <linux/spinlock.h>
+#include <linux/irq_work.h>
+#include <linux/kallsyms.h>
+#include <linux/kobject.h>
 #include <linux/kprobes.h>
-#include <linux/ptrace.h>
-#include <linux/version.h>
 #include <linux/math64.h>
+#include <linux/miscdevice.h>
+#include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/pm_runtime.h>
+#include <linux/slab.h>
+#include <linux/spinlock.h>
+#include <linux/suspend.h>
+#include <linux/sysfs.h>
+#include <linux/timer.h>
+#include <linux/uaccess.h>
+#include <linux/workqueue.h>
 
-#include <drm/drm_device.h>
-#include <drm/drm_drv.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_crtc.h>
+#include <drm/drm_device.h>
+#include <drm/drm_drv.h>
 #include <drm/drm_property.h>
-#include <drm/drm_mode.h>
 
 #include "prisma_abi.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("prism-amd Contributors");
-MODULE_DESCRIPTION("Hardware Linear CTM Interceptor for AMDGPU DRM/KMS");
+MODULE_DESCRIPTION("Atomic DRM/KMS hardware color calibration for AMDGPU");
 MODULE_VERSION(PRISMA_VERSION);
 
-/*
- * Kernel compatibility:
- * In Linux 6.13+ / 7.x, struct drm_atomic_state was renamed to struct drm_atomic_commit.
- */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
-#ifndef drm_atomic_state
-#define drm_atomic_state drm_atomic_commit
-#endif
+#ifdef PRISMA_DRM_ATOMIC_COMMIT
+#define chroma_atomic_state drm_atomic_commit
+#define chroma_atomic_alloc drm_atomic_commit_alloc
+#define chroma_atomic_put drm_atomic_commit_put
+#else
+#define chroma_atomic_state drm_atomic_state
+#define chroma_atomic_alloc drm_atomic_state_alloc
+#define chroma_atomic_put drm_atomic_state_put
 #endif
 
 /* Rec.709 integer luminance weights scaled by 10000 */
@@ -55,35 +48,6 @@ MODULE_VERSION(PRISMA_VERSION);
 #define REC709_GW 7152LL
 #define REC709_BW 722LL
 
-#define MAX_CRTCS 32
-
-/* State tuning parameters */
-static int g_saturation = 100; // 0 to 400 (default 100 = 100%)
-static int g_contrast = 100;   // 10 to 300 (default 100 = 100%)
-static int g_brightness = 0;   // -100 to 100 (default 0 = 0%)
-static int g_enabled = 1;      // 0 or 1 (default 1)
-
-static atomic_t config_generation = ATOMIC_INIT(1);
-static int g_crtc_applied_ctm_gen[MAX_CRTCS];
-
-static DEFINE_SPINLOCK(g_ctm_lock);
-static struct drm_color_ctm g_current_ctm;
-
-/*
- * Returns true if current configuration matches identity transform
- * (100% saturation, 100% contrast, 0% brightness).
- */
-static inline bool chroma_is_identity(void)
-{
-	return (g_saturation == 100 && g_contrast == 100 && g_brightness == 0);
-}
-
-/*
- * Converts rational value (num / den) into 64-bit S31.32 sign-magnitude fixed-point
- * format required by Linux DRM kernel (struct drm_color_ctm):
- * - Bit 63: sign bit (1 = negative, 0 = positive)
- * - Bits 0..62: absolute magnitude scaled by 2^32
- */
 static u64 to_s31_32(s64 num, u64 den)
 {
 	u64 sign = 0;
@@ -149,147 +113,507 @@ static void chroma_compute_ctm(struct drm_color_ctm *ctm, int sat_val, int con_v
 	}
 }
 
-/*
- * Recalculates current CTM from active tuning parameters
- */
-static void chroma_recalc_ctm(void)
+static DEFINE_MUTEX(config_lock);
+static struct prisma_ioctl_state config = {
+	.abi_version = PRISMA_ABI_VERSION,
+	.enabled = 1,
+	.saturation = 100,
+	.contrast = 100,
+};
+
+static struct prisma_ioctl_state chroma_snapshot(void)
 {
-	struct drm_color_ctm new_ctm;
-	unsigned long flags;
+	struct prisma_ioctl_state state;
 
-	chroma_compute_ctm(&new_ctm, g_saturation, g_contrast, g_brightness);
-
-	spin_lock_irqsave(&g_ctm_lock, flags);
-	memcpy(&g_current_ctm, &new_ctm, sizeof(new_ctm));
-	spin_unlock_irqrestore(&g_ctm_lock, flags);
+	mutex_lock(&config_lock);
+	state = config;
+	mutex_unlock(&config_lock);
+	return state;
 }
 
-/*
- * /dev/chroma_amd File Operations (miscdevice)
+struct chroma_gpu {
+	struct list_head link;
+	struct drm_device *dev;
+	struct module *owner;
+	unsigned int num_crtcs;
+	struct drm_property_blob *owned[];
+};
+
+/* Only simultaneous discoveries are bounded. Tracked devices and CRTCs are dynamic. */
+#define CHROMA_PENDING_GPUS 32
+#define CHROMA_RECHECK (2 * HZ)
+
+static DEFINE_RAW_SPINLOCK(discovery_lock);
+static LIST_HEAD(gpus);
+static struct drm_device *pending[CHROMA_PENDING_GPUS];
+static bool paused;
+static bool refresh_queued;
+static struct workqueue_struct *chroma_wq;
+static struct work_struct refresh_work;
+
+static void chroma_schedule(void)
+{
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&discovery_lock, flags);
+	if (!paused && !refresh_queued) {
+		refresh_queued = true;
+		queue_work(chroma_wq, &refresh_work);
+	}
+	raw_spin_unlock_irqrestore(&discovery_lock, flags);
+}
+
+static void chroma_discovery_ready(struct irq_work *work)
+{
+	chroma_schedule();
+}
+
+static DEFINE_IRQ_WORK(discovery_irq, chroma_discovery_ready);
+
+static void chroma_recheck(struct timer_list *timer)
+{
+	chroma_schedule();
+}
+
+static DEFINE_TIMER(recheck_timer, chroma_recheck);
+
+static bool chroma_has_ctm(struct drm_crtc *crtc)
+{
+	struct drm_property *ctm = crtc->dev->mode_config.ctm_property;
+	struct drm_object_properties *props = &crtc->properties;
+	int i;
+
+	for (i = 0; i < props->count; ++i) {
+		if (props->properties[i] == ctm)
+			return true;
+	}
+	return false;
+}
+
+static int chroma_update_crtc(struct drm_crtc *crtc,
+			      struct drm_property_blob **owned,
+			      const struct drm_color_ctm *target)
+{
+	struct drm_modeset_acquire_ctx ctx;
+	struct drm_property_blob *candidate;
+	struct drm_crtc_state *new_state;
+	struct chroma_atomic_state *state;
+	int ret;
+
+	drm_modeset_acquire_init(&ctx, 0);
+	for (;;) {
+		ret = drm_modeset_lock(&crtc->mutex, &ctx);
+		if (ret)
+			goto retry;
+
+		/* Ownership belongs to the exact blob installed by a successful commit. */
+		if (*owned && crtc->state->ctm != *owned)
+			drm_property_replace_blob(owned, NULL);
+		if (target) {
+			if (!crtc->state->active || (crtc->state->ctm && !*owned))
+				break;
+			if (*owned && !memcmp((*owned)->data, target, sizeof(*target)))
+				break;
+		} else if (!*owned) {
+			break;
+		}
+
+		state = chroma_atomic_alloc(crtc->dev);
+		if (!state) {
+			ret = -ENOMEM;
+			break;
+		}
+		state->acquire_ctx = &ctx;
+		state->allow_modeset = false;
+		candidate = NULL;
+		new_state = drm_atomic_get_crtc_state(state, crtc);
+		if (IS_ERR(new_state)) {
+			ret = PTR_ERR(new_state);
+			goto put_state;
+		}
+		if (target) {
+			candidate = drm_property_create_blob(crtc->dev, sizeof(*target), target);
+			if (IS_ERR(candidate)) {
+				ret = PTR_ERR(candidate);
+				goto put_state;
+			}
+		}
+		drm_property_replace_blob(&new_state->ctm, candidate);
+		new_state->color_mgmt_changed = true;
+		ret = drm_atomic_commit(state);
+		if (!ret) {
+			drm_property_replace_blob(owned, candidate);
+			pr_debug("chroma_amd: %s CRTC %u CTM blob %u\n",
+				 dev_name(crtc->dev->dev), crtc->base.id,
+				 candidate ? candidate->base.id : 0);
+		}
+		drm_property_blob_put(candidate);
+put_state:
+		chroma_atomic_put(state);
+retry:
+		if (ret != -EDEADLK)
+			break;
+		ret = drm_modeset_backoff(&ctx);
+		if (ret)
+			break;
+	}
+	drm_modeset_drop_locks(&ctx);
+	drm_modeset_acquire_fini(&ctx);
+	return ret;
+}
+
+/* The DRM reference keeps the mode-config storage alive. SRCU guards hardware
+ * and driver state until amdgpu_pci_remove's drm_dev_unplug() can proceed.
  */
+static int chroma_update_gpu(struct chroma_gpu *gpu, const struct drm_color_ctm *target)
+{
+	struct drm_device *dev = gpu->dev;
+	struct drm_crtc *crtc;
+	unsigned int i;
+	int idx, pm, ret = 0;
+
+	if (!target) {
+		for (i = 0; i < gpu->num_crtcs && !gpu->owned[i]; ++i)
+			;
+		if (i == gpu->num_crtcs)
+			return 0;
+	}
+	if (!drm_dev_enter(dev, &idx))
+		return -ENODEV;
+	pm = pm_runtime_get_if_active(dev->dev);
+	if (pm != 0) {
+		drm_for_each_crtc(crtc, dev) {
+			struct drm_property_blob **owned;
+			int err;
+
+			i = drm_crtc_index(crtc);
+			if (i >= gpu->num_crtcs)
+				continue;
+			owned = &gpu->owned[i];
+			if ((!target && !*owned) || !chroma_has_ctm(crtc))
+				continue;
+			err = chroma_update_crtc(crtc, owned, target);
+			if (err) {
+				ret = err;
+				pr_warn_ratelimited("chroma_amd: %s CRTC %u: CTM commit failed: %pe\n",
+						    dev_name(dev->dev), crtc->base.id, ERR_PTR(err));
+			}
+		}
+		if (pm > 0)
+			__pm_runtime_put_autosuspend(dev->dev);
+	} else {
+		ret = -EAGAIN;
+	}
+	drm_dev_exit(idx);
+	return ret;
+}
+
+static void chroma_put_gpu(struct drm_device *dev, struct module *owner)
+{
+	drm_dev_put(dev);
+	module_put(owner);
+}
+
+static void chroma_forget_gpu(struct chroma_gpu *gpu)
+{
+	unsigned long flags;
+	unsigned int i;
+
+	raw_spin_lock_irqsave(&discovery_lock, flags);
+	list_del(&gpu->link);
+	raw_spin_unlock_irqrestore(&discovery_lock, flags);
+
+	for (i = 0; i < gpu->num_crtcs; ++i)
+		drm_property_blob_put(gpu->owned[i]);
+	chroma_put_gpu(gpu->dev, gpu->owner);
+	kfree(gpu);
+}
+
+static void chroma_collect_gpus(void)
+{
+	unsigned long flags;
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(pending); ++i) {
+		struct drm_device *dev;
+		struct chroma_gpu *gpu;
+		struct module *owner;
+		unsigned int num_crtcs;
+
+		raw_spin_lock_irqsave(&discovery_lock, flags);
+		dev = pending[i];
+		raw_spin_unlock_irqrestore(&discovery_lock, flags);
+		if (!dev)
+			continue;
+
+		owner = dev->driver->fops->owner;
+		num_crtcs = dev->mode_config.num_crtc;
+		gpu = kzalloc(struct_size(gpu, owned, num_crtcs), GFP_KERNEL);
+		if (gpu) {
+			gpu->dev = dev;
+			gpu->owner = owner;
+			gpu->num_crtcs = num_crtcs;
+		} else {
+			pr_warn_ratelimited("chroma_amd: could not track %s\n", dev_name(dev->dev));
+		}
+
+		raw_spin_lock_irqsave(&discovery_lock, flags);
+		pending[i] = NULL;
+		if (gpu)
+			list_add_tail(&gpu->link, &gpus);
+		raw_spin_unlock_irqrestore(&discovery_lock, flags);
+
+		if (!gpu)
+			chroma_put_gpu(dev, owner);
+	}
+}
+
+static void chroma_refresh(struct work_struct *work)
+{
+	struct prisma_ioctl_state snapshot;
+	struct chroma_gpu *gpu, *next;
+	struct drm_color_ctm ctm;
+	struct drm_color_ctm *target = NULL;
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&discovery_lock, flags);
+	refresh_queued = false;
+	if (paused) {
+		raw_spin_unlock_irqrestore(&discovery_lock, flags);
+		return;
+	}
+	raw_spin_unlock_irqrestore(&discovery_lock, flags);
+
+	snapshot = chroma_snapshot();
+	if (snapshot.enabled &&
+	    (snapshot.saturation != 100 || snapshot.contrast != 100 || snapshot.brightness)) {
+		chroma_compute_ctm(&ctm, snapshot.saturation, snapshot.contrast, snapshot.brightness);
+		target = &ctm;
+	}
+	chroma_collect_gpus();
+	list_for_each_entry_safe(gpu, next, &gpus, link) {
+		chroma_update_gpu(gpu, target);
+		if (drm_dev_is_unplugged(gpu->dev))
+			chroma_forget_gpu(gpu);
+	}
+	raw_spin_lock_irqsave(&discovery_lock, flags);
+	if (!paused && !list_empty(&gpus) && !timer_pending(&recheck_timer))
+		mod_timer(&recheck_timer, jiffies + CHROMA_RECHECK);
+	raw_spin_unlock_irqrestore(&discovery_lock, flags);
+}
+
+/* Retain only the device. The commit caller already owns a DRM reference,
+ * so drm_dev_get() only increments the refcount in the probe.
+ */
+static int chroma_observe(struct kprobe *probe, struct pt_regs *regs)
+{
+	struct drm_device *dev = (void *)regs_get_kernel_argument(regs, 0);
+	struct chroma_gpu *gpu;
+	unsigned int i, slot = ARRAY_SIZE(pending);
+	unsigned long flags;
+	bool discovered = false;
+
+	if (!dev || !dev->driver->name || strcmp(dev->driver->name, "amdgpu") ||
+	    !READ_ONCE(dev->registered) || !dev->mode_config.ctm_property)
+		return 0;
+	/* An INT3 probe can enter with NMI accounting. Defer on contention. */
+	if (!raw_spin_trylock_irqsave(&discovery_lock, flags))
+		return 0;
+	list_for_each_entry(gpu, &gpus, link) {
+		if (gpu->dev == dev)
+			goto out;
+	}
+	for (i = 0; i < ARRAY_SIZE(pending); ++i) {
+		if (pending[i] == dev)
+			goto out;
+		if (!pending[i] && slot == ARRAY_SIZE(pending))
+			slot = i;
+	}
+	if (slot != ARRAY_SIZE(pending) && try_module_get(dev->driver->fops->owner)) {
+		drm_dev_get(dev);
+		pending[slot] = dev;
+		discovered = true;
+	}
+out:
+	raw_spin_unlock_irqrestore(&discovery_lock, flags);
+	if (discovered)
+		irq_work_queue(&discovery_irq);
+	return 0;
+}
+NOKPROBE_SYMBOL(chroma_observe);
+
+static struct kprobe chroma_kp = {
+	.pre_handler = chroma_observe,
+};
+
+static void chroma_pause(void)
+{
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&discovery_lock, flags);
+	paused = true;
+	raw_spin_unlock_irqrestore(&discovery_lock, flags);
+	timer_delete_sync(&recheck_timer);
+	flush_work(&refresh_work);
+}
+
+static int chroma_pm_event(struct notifier_block *notifier, unsigned long event, void *unused)
+{
+	unsigned long flags;
+
+	switch (event) {
+	case PM_SUSPEND_PREPARE:
+	case PM_HIBERNATION_PREPARE:
+	case PM_RESTORE_PREPARE:
+		chroma_pause();
+		break;
+	case PM_POST_SUSPEND:
+	case PM_POST_HIBERNATION:
+	case PM_POST_RESTORE:
+		raw_spin_lock_irqsave(&discovery_lock, flags);
+		paused = false;
+		raw_spin_unlock_irqrestore(&discovery_lock, flags);
+		chroma_schedule();
+		break;
+	}
+	return NOTIFY_OK;
+}
+
+static struct notifier_block chroma_pm_notifier = {
+	.notifier_call = chroma_pm_event,
+};
+
+static void chroma_stop(void)
+{
+	struct chroma_gpu *gpu, *next;
+	unsigned int i;
+
+	unregister_kprobe(&chroma_kp);
+	irq_work_sync(&discovery_irq);
+	unregister_pm_notifier(&chroma_pm_notifier);
+	chroma_pause();
+	list_for_each_entry_safe(gpu, next, &gpus, link) {
+		int ret = chroma_update_gpu(gpu, NULL);
+
+		if (ret && ret != -ENODEV)
+			pr_warn("chroma_amd: %s: display color restoration at unload failed: %pe\n",
+				dev_name(gpu->dev->dev), ERR_PTR(ret));
+		chroma_forget_gpu(gpu);
+	}
+	for (i = 0; i < ARRAY_SIZE(pending); ++i) {
+		struct drm_device *dev = pending[i];
+
+		if (dev)
+			chroma_put_gpu(dev, dev->driver->fops->owner);
+	}
+	destroy_workqueue(chroma_wq);
+}
+
+static int chroma_parse_config(char *input, struct prisma_ioctl_state *next)
+{
+	char *token, *key;
+	int value;
+
+	while ((token = strsep(&input, " \t\r\n"))) {
+		if (!*token)
+			continue;
+		key = strsep(&token, "=");
+		if (!token || kstrtoint(token, 10, &value))
+			return -EINVAL;
+
+		if (!strcmp(key, "saturation")) {
+			if (value < 0 || value > 400)
+				return -EINVAL;
+			next->saturation = value;
+		} else if (!strcmp(key, "contrast")) {
+			if (value < 10 || value > 300)
+				return -EINVAL;
+			next->contrast = value;
+		} else if (!strcmp(key, "brightness")) {
+			if (value < -100 || value > 100)
+				return -EINVAL;
+			next->brightness = value;
+		} else if (!strcmp(key, "enabled")) {
+			if (value != 0 && value != 1)
+				return -EINVAL;
+			next->enabled = value;
+		} else {
+			return -EINVAL;
+		}
+	}
+	return 0;
+}
+
 static ssize_t chroma_dev_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
+	struct prisma_ioctl_state state = chroma_snapshot();
 	char msg[160];
 	int len;
 
 	len = scnprintf(msg, sizeof(msg),
-			"abi_version=%d\n"
-			"enabled=%d\n"
-			"saturation=%d\n"
-			"contrast=%d\n"
-			"brightness=%d\n",
-			PRISMA_ABI_VERSION, g_enabled, g_saturation, g_contrast, g_brightness);
-
+			"abi_version=%u\nenabled=%d\nsaturation=%d\ncontrast=%d\nbrightness=%d\n",
+			state.abi_version, state.enabled, state.saturation,
+			state.contrast, state.brightness);
 	return simple_read_from_buffer(buf, count, ppos, msg, len);
 }
 
 static ssize_t chroma_dev_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 {
-	char kbuf[256];
-	char *p, *line, *key, *val_str;
-	int val;
-	bool changed = false;
+	struct prisma_ioctl_state next;
+	char input[256];
+	int ret;
 
-	if (count == 0)
+	if (!count)
 		return 0;
-	if (count >= sizeof(kbuf))
+	if (count >= sizeof(input))
 		return -EINVAL;
-
-	if (copy_from_user(kbuf, buf, count))
+	if (copy_from_user(input, buf, count))
 		return -EFAULT;
+	if (memchr(input, '\0', count))
+		return -EINVAL;
+	input[count] = '\0';
 
-	kbuf[count] = '\0';
-	p = kbuf;
+	mutex_lock(&config_lock);
+	next = config;
+	ret = chroma_parse_config(input, &next);
+	if (!ret)
+		config = next;
+	mutex_unlock(&config_lock);
 
-	while ((line = strsep(&p, " \t\r\n")) != NULL) {
-		if (*line == '\0')
-			continue;
-
-		key = strsep(&line, "=");
-		val_str = line;
-		if (!key || !val_str || *val_str == '\0')
-			return -EINVAL;
-
-		if (kstrtoint(val_str, 10, &val) < 0)
-			return -EINVAL;
-
-		if (strcmp(key, "saturation") == 0) {
-			if (val < 0 || val > 400)
-				return -EINVAL;
-			g_saturation = val;
-			changed = true;
-		} else if (strcmp(key, "contrast") == 0) {
-			if (val < 10 || val > 300)
-				return -EINVAL;
-			g_contrast = val;
-			changed = true;
-		} else if (strcmp(key, "brightness") == 0) {
-			if (val < -100 || val > 100)
-				return -EINVAL;
-			g_brightness = val;
-			changed = true;
-		} else if (strcmp(key, "enabled") == 0) {
-			if (val != 0 && val != 1)
-				return -EINVAL;
-			g_enabled = val;
-			changed = true;
-		} else {
-			return -EINVAL;
-		}
-	}
-
-	if (changed) {
-		chroma_recalc_ctm();
-		atomic_inc(&config_generation);
-	}
-
+	if (ret)
+		return ret;
+	chroma_schedule();
 	return count;
 }
 
 static long chroma_dev_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
+	void __user *buf = (void __user *)arg;
+	struct prisma_ioctl_state state;
+	u32 abi = PRISMA_ABI_VERSION;
+
 	switch (cmd) {
-	case PRISMA_IOC_GET_ABI: {
-		uint32_t abi = PRISMA_ABI_VERSION;
-		if (copy_to_user((void __user *)arg, &abi, sizeof(abi)))
+	case PRISMA_IOC_GET_ABI:
+		return copy_to_user(buf, &abi, sizeof(abi)) ? -EFAULT : 0;
+	case PRISMA_IOC_GET_STATE:
+		state = chroma_snapshot();
+		return copy_to_user(buf, &state, sizeof(state)) ? -EFAULT : 0;
+	case PRISMA_IOC_SET_STATE:
+		if (copy_from_user(&state, buf, sizeof(state)))
 			return -EFAULT;
-		return 0;
-	}
-	case PRISMA_IOC_GET_STATE: {
-		struct prisma_ioctl_state st;
-		st.abi_version = PRISMA_ABI_VERSION;
-		st.enabled = g_enabled;
-		st.saturation = g_saturation;
-		st.contrast = g_contrast;
-		st.brightness = g_brightness;
-		if (copy_to_user((void __user *)arg, &st, sizeof(st)))
-			return -EFAULT;
-		return 0;
-	}
-	case PRISMA_IOC_SET_STATE: {
-		struct prisma_ioctl_state st;
-		if (copy_from_user(&st, (void __user *)arg, sizeof(st)))
-			return -EFAULT;
-		if (st.abi_version != PRISMA_ABI_VERSION)
+		if (state.abi_version != PRISMA_ABI_VERSION)
 			return -EPROTO;
-		if (st.saturation < 0 || st.saturation > 400)
-			return -EINVAL;
-		if (st.contrast < 10 || st.contrast > 300)
-			return -EINVAL;
-		if (st.brightness < -100 || st.brightness > 100)
-			return -EINVAL;
-		if (st.enabled != 0 && st.enabled != 1)
+		if (state.saturation < 0 || state.saturation > 400 ||
+		    state.contrast < 10 || state.contrast > 300 ||
+		    state.brightness < -100 || state.brightness > 100 ||
+		    (state.enabled != 0 && state.enabled != 1))
 			return -EINVAL;
 
-		g_saturation = st.saturation;
-		g_contrast = st.contrast;
-		g_brightness = st.brightness;
-		g_enabled = st.enabled;
-
-		chroma_recalc_ctm();
-		atomic_inc(&config_generation);
+		mutex_lock(&config_lock);
+		config = state;
+		mutex_unlock(&config_lock);
+		chroma_schedule();
 		return 0;
-	}
 	default:
 		return -ENOTTY;
 	}
@@ -301,7 +625,7 @@ static const struct file_operations chroma_fops = {
 	.write = chroma_dev_write,
 	.unlocked_ioctl = chroma_dev_ioctl,
 #ifdef CONFIG_COMPAT
-	.compat_ioctl = chroma_dev_ioctl,
+	.compat_ioctl = compat_ptr_ioctl,
 #endif
 	.llseek = default_llseek,
 };
@@ -313,38 +637,18 @@ static struct miscdevice chroma_misc_dev = {
 	.mode = 0660,
 };
 
-/*
- * Sysfs Read-Only Telemetry (/sys/kernel/chroma_amd/)
- */
-static ssize_t abi_version_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
-{
-	return sysfs_emit(buf, "%d\n", PRISMA_ABI_VERSION);
-}
-static struct kobj_attribute abi_version_attr = __ATTR_RO(abi_version);
+#define CHROMA_ATTR(field, format) \
+static ssize_t field##_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf) \
+{ \
+	return sysfs_emit(buf, format "\n", chroma_snapshot().field); \
+} \
+static struct kobj_attribute field##_attr = __ATTR_RO(field)
 
-static ssize_t saturation_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
-{
-	return sysfs_emit(buf, "%d\n", g_saturation);
-}
-static struct kobj_attribute saturation_attr = __ATTR_RO(saturation);
-
-static ssize_t contrast_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
-{
-	return sysfs_emit(buf, "%d\n", g_contrast);
-}
-static struct kobj_attribute contrast_attr = __ATTR_RO(contrast);
-
-static ssize_t brightness_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
-{
-	return sysfs_emit(buf, "%d\n", g_brightness);
-}
-static struct kobj_attribute brightness_attr = __ATTR_RO(brightness);
-
-static ssize_t enabled_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
-{
-	return sysfs_emit(buf, "%d\n", g_enabled);
-}
-static struct kobj_attribute enabled_attr = __ATTR_RO(enabled);
+CHROMA_ATTR(abi_version, "%u");
+CHROMA_ATTR(saturation, "%d");
+CHROMA_ATTR(contrast, "%d");
+CHROMA_ATTR(brightness, "%d");
+CHROMA_ATTR(enabled, "%d");
 
 static struct attribute *chroma_attrs[] = {
 	&abi_version_attr.attr,
@@ -354,182 +658,62 @@ static struct attribute *chroma_attrs[] = {
 	&enabled_attr.attr,
 	NULL,
 };
-
-static const struct attribute_group chroma_attr_group = {
-	.attrs = chroma_attrs,
-};
+ATTRIBUTE_GROUPS(chroma);
 
 static struct kobject *chroma_kobj;
-
-/*
- * Returns true if any CRTC currently has a chroma-injected CTM blob applied.
- */
-static bool chroma_has_active_injections(void)
-{
-	int idx;
-	for (idx = 0; idx < MAX_CRTCS; ++idx) {
-		if (g_crtc_applied_ctm_gen[idx] != 0)
-			return true;
-	}
-	return false;
-}
-
-/*
- * Kprobe handler intercepting drm_atomic_helper_commit
- */
-static int chroma_pre_handler(struct kprobe *p, struct pt_regs *regs)
-{
-	/* On x86_64: 1st argument in %rdi, 2nd argument in %rsi */
-	struct drm_device *dev = (struct drm_device *)regs->di;
-	struct drm_atomic_state *state = (struct drm_atomic_state *)regs->si;
-	struct drm_crtc *crtc;
-	struct drm_crtc_state *new_crtc_state;
-	int i;
-	int cur_gen;
-	int enabled;
-	struct drm_color_ctm ctm_copy;
-	unsigned long flags;
-
-	if (!dev || !state)
-		return 0;
-
-	if (!dev->driver || !dev->driver->name)
-		return 0;
-
-	/* Verify target is AMDGPU driver */
-	if (strcmp(dev->driver->name, "amdgpu") != 0)
-		return 0;
-
-	enabled = g_enabled;
-	cur_gen = atomic_read(&config_generation);
-
-	if (enabled == 1 && !chroma_is_identity()) {
-		spin_lock_irqsave(&g_ctm_lock, flags);
-		memcpy(&ctm_copy, &g_current_ctm, sizeof(ctm_copy));
-		spin_unlock_irqrestore(&g_ctm_lock, flags);
-
-		for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
-			unsigned int idx;
-			struct drm_property_blob *new_blob;
-
-			if (!new_crtc_state || !new_crtc_state->active)
-				continue;
-
-			idx = drm_crtc_index(crtc);
-			if (idx >= MAX_CRTCS)
-				continue;
-
-			/* Apply CTM matrix (combines saturation, contrast and linear brightness gain) */
-			if (g_crtc_applied_ctm_gen[idx] != cur_gen || !new_crtc_state->ctm) {
-				new_blob = drm_property_create_blob(dev, sizeof(struct drm_color_ctm), &ctm_copy);
-				if (!IS_ERR(new_blob)) {
-					drm_property_replace_blob(&new_crtc_state->ctm, new_blob);
-					drm_property_blob_put(new_blob);
-					new_crtc_state->color_mgmt_changed = true;
-					g_crtc_applied_ctm_gen[idx] = cur_gen;
-				}
-			}
-		}
-	} else {
-		/*
-		 * When disabled (enabled == 0) or identity:
-		 * If no chroma injection is active, return immediately without touching
-		 * any CRTC state. This strictly guarantees that external CTM matrices configured
-		 * by the compositor (night light, ICC profiles, HDR) are NEVER overwritten.
-		 */
-		if (!chroma_has_active_injections())
-			return 0;
-
-		/* Only clean up CRTCs where our module previously injected a custom CTM */
-		for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
-			unsigned int idx;
-
-			if (!new_crtc_state)
-				continue;
-
-			idx = drm_crtc_index(crtc);
-			if (idx >= MAX_CRTCS)
-				continue;
-
-			if (g_crtc_applied_ctm_gen[idx] != 0) {
-				drm_property_replace_blob(&new_crtc_state->ctm, NULL);
-				new_crtc_state->color_mgmt_changed = true;
-				g_crtc_applied_ctm_gen[idx] = 0;
-			}
-		}
-	}
-
-	return 0;
-}
-
-static struct kprobe chroma_kp = {
-	.symbol_name = "drm_atomic_helper_commit",
-	.pre_handler = chroma_pre_handler,
-};
 
 static int __init chroma_init(void)
 {
 	int ret;
 
-	pr_info("chroma_amd: Initializing Linux kernel module for AMDGPU hardware color acceleration (prism-amd)...\n");
-
-	/* Pre-calculate initial CTM (100% saturation, 100% contrast) */
-	chroma_recalc_ctm();
-
-	/* Register misc character device /dev/chroma_amd */
-	ret = misc_register(&chroma_misc_dev);
+	chroma_wq = alloc_ordered_workqueue("chroma_amd", WQ_FREEZABLE);
+	if (!chroma_wq)
+		return -ENOMEM;
+	INIT_WORK(&refresh_work, chroma_refresh);
+	ret = register_pm_notifier(&chroma_pm_notifier);
+	if (ret)
+		goto destroy_queue;
+	/* A symbol reference lets modprobe load drm_kms_helper when it is modular. */
+	chroma_kp.addr = dereference_symbol_descriptor(drm_atomic_helper_commit);
+	ret = register_kprobe(&chroma_kp);
 	if (ret) {
-		pr_err("chroma_amd: Failed to register misc device /dev/chroma_amd: %d\n", ret);
-		return ret;
+		pr_err("chroma_amd: could not register the DRM discovery probe: %pe\n",
+		       ERR_PTR(ret));
+		goto remove_notifier;
 	}
 
-	/* Create read-only sysfs telemetry interface /sys/kernel/chroma_amd/ */
 	chroma_kobj = kobject_create_and_add("chroma_amd", kernel_kobj);
 	if (!chroma_kobj) {
-		pr_err("chroma_amd: Failed to create kobject in kernel_kobj\n");
-		misc_deregister(&chroma_misc_dev);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto stop;
 	}
+	ret = sysfs_create_groups(chroma_kobj, chroma_groups);
+	if (ret)
+		goto put_kobj;
+	ret = misc_register(&chroma_misc_dev);
+	if (!ret)
+		return 0;
 
-	ret = sysfs_create_group(chroma_kobj, &chroma_attr_group);
-	if (ret) {
-		pr_err("chroma_amd: Failed to create sysfs attribute group: %d\n", ret);
-		kobject_put(chroma_kobj);
-		misc_deregister(&chroma_misc_dev);
-		return ret;
-	}
-
-	/* Register kprobe on drm_atomic_helper_commit */
-	ret = register_kprobe(&chroma_kp);
-	if (ret < 0) {
-		pr_err("chroma_amd: Failed to register kprobe on drm_atomic_helper_commit: %d\n", ret);
-		sysfs_remove_group(chroma_kobj, &chroma_attr_group);
-		kobject_put(chroma_kobj);
-		misc_deregister(&chroma_misc_dev);
-		return ret;
-	}
-
-	pr_info("chroma_amd: Kprobe registered successfully on %s (addr: %p)\n",
-		chroma_kp.symbol_name, chroma_kp.addr);
-	pr_info("chroma_amd: /dev/chroma_amd ready for zero-overhead hardware control!\n");
-
-	return 0;
+	sysfs_remove_groups(chroma_kobj, chroma_groups);
+put_kobj:
+	kobject_put(chroma_kobj);
+stop:
+	chroma_stop();
+	return ret;
+remove_notifier:
+	unregister_pm_notifier(&chroma_pm_notifier);
+	chroma_pause();
+destroy_queue:
+	destroy_workqueue(chroma_wq);
+	return ret;
 }
 
 static void __exit chroma_exit(void)
 {
-	pr_info("chroma_amd: Unloading module...\n");
-
-	unregister_kprobe(&chroma_kp);
-
-	if (chroma_kobj) {
-		sysfs_remove_group(chroma_kobj, &chroma_attr_group);
-		kobject_put(chroma_kobj);
-	}
-
 	misc_deregister(&chroma_misc_dev);
-
-	pr_info("chroma_amd: Module unloaded successfully.\n");
+	sysfs_remove_groups(chroma_kobj, chroma_groups);
+	kobject_put(chroma_kobj);
+	chroma_stop();
 }
 
 module_init(chroma_init);

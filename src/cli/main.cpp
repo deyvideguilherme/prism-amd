@@ -57,7 +57,7 @@ int handle_status(bool json_output) {
                       << "  \"telemetry\": " << prisma::format_telemetry_json(telem) << "\n"
                       << "}\n";
         } else {
-            std::cout << "=== Prisma Display State (/dev/chroma_amd) ===\n"
+            std::cout << "=== Prisma Color Configuration (/dev/chroma_amd) ===\n"
                       << "Enabled:            " << (state.enabled ? "yes" : "no") << "\n"
                       << "Saturation:         " << state.saturation << " % (Rec.709 CTM)\n"
                       << "Contrast:           " << state.contrast << " %\n"
@@ -95,21 +95,42 @@ int handle_set(int argc, char* argv[]) {
     std::optional<int> enabled;
 
     for (int i = 2; i < argc; ++i) {
-        std::string arg = argv[i];
+        const std::string arg = argv[i];
+        std::optional<int>* destination;
+        std::string_view key;
         if (arg == "-s" || arg == "--saturation") {
-            if (++i >= argc) { std::cerr << "Missing value for " << arg << "\n"; return 1; }
-            saturation = std::stoi(argv[i]);
+            destination = &saturation;
+            key = "saturation";
         } else if (arg == "-c" || arg == "--contrast") {
-            if (++i >= argc) { std::cerr << "Missing value for " << arg << "\n"; return 1; }
-            contrast = std::stoi(argv[i]);
+            destination = &contrast;
+            key = "contrast";
         } else if (arg == "-b" || arg == "--brightness") {
-            if (++i >= argc) { std::cerr << "Missing value for " << arg << "\n"; return 1; }
-            brightness = std::stoi(argv[i]);
+            destination = &brightness;
+            key = "brightness";
         } else if (arg == "-e" || arg == "--enabled") {
-            if (++i >= argc) { std::cerr << "Missing value for " << arg << "\n"; return 1; }
-            enabled = std::stoi(argv[i]);
+            destination = &enabled;
+            key = "enabled";
         } else {
             std::cerr << "Unknown set option: " << arg << "\n";
+            return 1;
+        }
+        if (++i >= argc) {
+            std::cerr << "Missing value for " << arg << "\n";
+            return 1;
+        }
+
+        const std::string input = argv[i];
+        try {
+            size_t consumed;
+            const int value = std::stoi(input, &consumed);
+            if (consumed != input.size()) throw std::invalid_argument("trailing characters");
+            prisma::validate_parameter(key, value);
+            *destination = value;
+        } catch (const prisma::DeviceError& e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            return 1;
+        } catch (const std::logic_error&) {
+            std::cerr << "Invalid integer for " << arg << "\n";
             return 1;
         }
     }
@@ -122,7 +143,7 @@ int handle_set(int argc, char* argv[]) {
     try {
         prisma::write_device_params(saturation, contrast, brightness, enabled);
         prisma::DeviceState cur = prisma::read_device_state();
-        std::cout << "Hardware parameters updated successfully:\n"
+        std::cout << "Color parameters accepted by the module:\n"
                   << "  Enabled:    " << (cur.enabled ? "yes" : "no") << "\n"
                   << "  Saturation: " << cur.saturation << " %\n"
                   << "  Contrast:   " << cur.contrast << " %\n"
@@ -188,7 +209,7 @@ int handle_profile(int argc, char* argv[]) {
         if (action == "apply") {
             prisma::DeviceState state = prisma::load_profile(name);
             prisma::write_device_state(state);
-            std::cout << "Profile '" << name << "' applied to hardware:\n"
+            std::cout << "Profile '" << name << "' submitted to the color module:\n"
                       << "  Saturation: " << state.saturation << " %\n"
                       << "  Contrast:   " << state.contrast << " %\n"
                       << "  Brightness: " << state.brightness << " %\n"

@@ -1,4 +1,5 @@
 #include "device.hpp"
+#include "file_descriptor.hpp"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -65,7 +66,7 @@ DeviceState parse_state_buffer(std::string_view buffer) {
 
         int val = 0;
         auto [ptr, ec] = std::from_chars(val_str.data(), val_str.data() + val_str.size(), val);
-        if (ec != std::errc()) {
+        if (ec != std::errc() || ptr != val_str.data() + val_str.size()) {
             continue;
         }
 
@@ -142,7 +143,8 @@ static void handle_posix_error(const std::string& dev_path, int err) {
 
 void check_device_abi(int fd, const std::string& dev_path) {
     struct stat st{};
-    if (::fstat(fd, &st) != 0 || !S_ISCHR(st.st_mode)) {
+    if (::fstat(fd, &st) < 0) handle_posix_error(dev_path, errno);
+    if (!S_ISCHR(st.st_mode)) {
         return; // Skip ioctl validation on regular mock files in tests
     }
 
@@ -153,7 +155,7 @@ void check_device_abi(int fd, const std::string& dev_path) {
             "Prisma ABI mismatch: kernel module does not support ABI v" +
             std::to_string(PRISMA_ABI_VERSION) + " (outdated module loaded).\n"
             "Please reload the kernel module:\n"
-            "  sudo rmmod chroma_amd && sudo modprobe chroma_amd  (or sudo make -C kernel reload)"
+            "  sudo rmmod chroma_amd && sudo modprobe chroma_amd  (or sudo make -C kernel unload && sudo make -C kernel load)"
         );
     }
 
@@ -163,24 +165,24 @@ void check_device_abi(int fd, const std::string& dev_path) {
             std::to_string(kabi) + ", but userspace expects ABI v" +
             std::to_string(PRISMA_ABI_VERSION) + ".\n"
             "Please reload the kernel module:\n"
-            "  sudo rmmod chroma_amd && sudo modprobe chroma_amd  (or sudo make -C kernel reload)"
+            "  sudo rmmod chroma_amd && sudo modprobe chroma_amd  (or sudo make -C kernel unload && sudo make -C kernel load)"
         );
     }
 }
 
 DeviceState read_device_state(const std::string& dev_path) {
-    int fd = ::open(dev_path.c_str(), O_RDONLY);
-    if (fd < 0) {
+    FileDescriptor fd(::open(dev_path.c_str(), O_RDONLY | O_CLOEXEC));
+    if (!fd) {
         handle_posix_error(dev_path, errno);
     }
 
     struct stat st{};
-    if (::fstat(fd, &st) == 0 && S_ISCHR(st.st_mode)) {
-        check_device_abi(fd, dev_path);
+    if (::fstat(fd.get(), &st) < 0) handle_posix_error(dev_path, errno);
+    if (S_ISCHR(st.st_mode)) {
+        check_device_abi(fd.get(), dev_path);
 
         struct prisma_ioctl_state ist{};
-        if (::ioctl(fd, PRISMA_IOC_GET_STATE, &ist) == 0) {
-            ::close(fd);
+        if (::ioctl(fd.get(), PRISMA_IOC_GET_STATE, &ist) == 0) {
             DeviceState state;
             state.abi_version = static_cast<int>(ist.abi_version);
             state.enabled = ist.enabled;
@@ -192,12 +194,13 @@ DeviceState read_device_state(const std::string& dev_path) {
     }
 
     char buf[512];
-    ssize_t bytes_read = ::read(fd, buf, sizeof(buf) - 1);
-    int saved_errno = errno;
-    ::close(fd);
+    ssize_t bytes_read;
+    do {
+        bytes_read = ::read(fd.get(), buf, sizeof(buf) - 1);
+    } while (bytes_read < 0 && errno == EINTR);
 
     if (bytes_read < 0) {
-        handle_posix_error(dev_path, saved_errno);
+        handle_posix_error(dev_path, errno);
     }
 
     buf[bytes_read] = '\0';
@@ -217,22 +220,18 @@ void write_device_params(
     }
     cmd += "\n";
 
-    int fd = ::open(dev_path.c_str(), O_WRONLY);
-    if (fd < 0) {
-        handle_posix_error(dev_path, errno);
-    }
+    FileDescriptor fd(::open(dev_path.c_str(), O_WRONLY | O_CLOEXEC));
+    if (!fd) handle_posix_error(dev_path, errno);
+    check_device_abi(fd.get(), dev_path);
 
-    struct stat st{};
-    if (::fstat(fd, &st) == 0 && S_ISCHR(st.st_mode)) {
-        check_device_abi(fd, dev_path);
-    }
+    ssize_t bytes_written;
+    do {
+        bytes_written = ::write(fd.get(), cmd.data(), cmd.size());
+    } while (bytes_written < 0 && errno == EINTR);
 
-    ssize_t bytes_written = ::write(fd, cmd.c_str(), cmd.size());
-    int saved_errno = errno;
-    ::close(fd);
-
-    if (bytes_written < 0) {
-        handle_posix_error(dev_path, saved_errno);
+    if (bytes_written < 0) handle_posix_error(dev_path, errno);
+    if (static_cast<size_t>(bytes_written) != cmd.size()) {
+        throw DeviceError("Incomplete write to '" + dev_path + "'");
     }
 }
 
