@@ -1,5 +1,11 @@
 obj-m += chroma_amd.o
 
+ifneq ($(srctree),)
+ifneq ($(shell grep -l "^drm_atomic_commit_alloc" "$(srctree)/include/drm/drm_atomic.h"),)
+ccflags-y += -DPRISMA_DRM_ATOMIC_COMMIT
+endif
+endif
+
 KDIR ?= /lib/modules/$(if $(KERNELRELEASE),$(KERNELRELEASE),$(shell uname -r))/build
 M ?= $(CURDIR)
 UDEV_DIR ?= /etc/udev/rules.d
@@ -21,17 +27,18 @@ clean:
 	$(MAKE) -C $(KDIR) M=$(M) $(EXTRA_FLAGS) clean
 
 load:
+	sudo modprobe drm_kms_helper
 	sudo insmod chroma_amd.ko
 
 unload:
 	sudo rmmod chroma_amd
 
 install-udev:
-	sudo install -Dm644 99-chroma-amd.rules $(UDEV_DIR)/99-chroma-amd.rules
+	sudo install -Dm644 70-chroma-amd.rules $(UDEV_DIR)/70-chroma-amd.rules
 	sudo udevadm control --reload-rules
 
 uninstall-udev:
-	sudo rm -f $(UDEV_DIR)/99-chroma-amd.rules
+	sudo rm -f $(UDEV_DIR)/70-chroma-amd.rules
 	sudo udevadm control --reload-rules
 
 .PHONY: all clean load unload install-udev uninstall-udev

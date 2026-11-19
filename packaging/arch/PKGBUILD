@@ -58,7 +58,7 @@ package() {
     echo "chroma_amd" > "$pkgdir/usr/lib/modules-load.d/chroma-amd.conf"
 
     # 4. Udev rule for unprivileged access (/dev/chroma_amd)
-    install -Dm644 "$_root/kernel/99-chroma-amd.rules" "$pkgdir/usr/lib/udev/rules.d/99-chroma-amd.rules"
+    install -Dm644 "$_root/kernel/70-chroma-amd.rules" "$pkgdir/usr/lib/udev/rules.d/70-chroma-amd.rules"
 
     # 5. Noctalia Shell plugin files
     local _ui_dir="$pkgdir/usr/share/prisma-control-center/ui/prisma"
