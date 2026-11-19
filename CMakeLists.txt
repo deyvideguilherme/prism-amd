@@ -133,7 +133,7 @@ set_target_properties(chroma_drm PROPERTIES
 )
 
 # ==============================================================================
-# 3. Unit Tests & Verification Binary (test_ctm)
+# 3. Unit Tests & Verification Binaries (test_ctm, test_cli)
 # ==============================================================================
 add_executable(test_ctm
     tests/test_ctm.cpp
@@ -149,14 +149,43 @@ target_link_libraries(test_ctm PRIVATE
     ${DRM_LIBRARIES}
 )
 
+# CLI & Telemetry Unit Tests
+add_executable(test_cli
+    tests/test_cli.cpp
+    src/cli/device.cpp
+    src/cli/telemetry.cpp
+    src/cli/profiles.cpp
+)
+
+target_include_directories(test_cli PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
 enable_testing()
 add_test(NAME test_ctm COMMAND test_ctm)
+add_test(NAME test_cli COMMAND test_cli)
+
+# ==============================================================================
+# 4. CLI Tool (prisma-ctl)
+# ==============================================================================
+add_executable(prisma-ctl
+    src/cli/main.cpp
+    src/cli/device.cpp
+    src/cli/telemetry.cpp
+    src/cli/profiles.cpp
+)
+
+target_include_directories(prisma-ctl PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
 
 # ==============================================================================
 # User Local Installation
 # ==============================================================================
+set(LOCAL_BIN_DIR "$ENV{HOME}/.local/bin")
 set(LOCAL_LIB_DIR "$ENV{HOME}/.local/lib")
 set(LOCAL_LAYER_DIR "$ENV{HOME}/.local/share/vulkan/implicit_layer.d")
+set(PRISMA_CTL_PATH "${LOCAL_BIN_DIR}/prisma-ctl")
 set(CHROMA_LAYER_PATH "${LOCAL_LIB_DIR}/libVkLayer_chroma.so")
 set(CHROMA_DRM_PATH "${LOCAL_LIB_DIR}/libchroma_drm.so")
 set(CHROMA_JSON_PATH "${LOCAL_LAYER_DIR}/VkLayer_chroma.json")
@@ -170,21 +199,24 @@ configure_file(
 
 # Target: install-local
 add_custom_target(install-local
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${LOCAL_BIN_DIR}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${LOCAL_LIB_DIR}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${LOCAL_LAYER_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:prisma-ctl>" "${PRISMA_CTL_PATH}"
     COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:VkLayer_chroma>" "${CHROMA_LAYER_PATH}"
     COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:chroma_drm>" "${CHROMA_DRM_PATH}"
     COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_BINARY_DIR}/VkLayer_chroma.json" "${CHROMA_JSON_PATH}"
-    DEPENDS VkLayer_chroma chroma_drm
-    COMMENT "Installing libVkLayer_chroma.so and libchroma_drm.so to ${LOCAL_LIB_DIR} and manifest to ${CHROMA_JSON_PATH}"
+    DEPENDS VkLayer_chroma chroma_drm prisma-ctl
+    COMMENT "Installing prisma-ctl to ${LOCAL_BIN_DIR}, libraries to ${LOCAL_LIB_DIR} and manifest to ${CHROMA_JSON_PATH}"
     VERBATIM
 )
 
 # Target: uninstall-local
 add_custom_target(uninstall-local
+    COMMAND ${CMAKE_COMMAND} -E remove -f "${PRISMA_CTL_PATH}"
     COMMAND ${CMAKE_COMMAND} -E remove -f "${CHROMA_LAYER_PATH}"
     COMMAND ${CMAKE_COMMAND} -E remove -f "${CHROMA_DRM_PATH}"
     COMMAND ${CMAKE_COMMAND} -E remove -f "${CHROMA_JSON_PATH}"
-    COMMENT "Removing local installation of prism-amd libraries and manifest"
+    COMMENT "Removing local installation of prisma binaries, libraries and manifest"
     VERBATIM
 )
