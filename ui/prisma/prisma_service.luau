@@ -77,13 +77,14 @@ local function appendHistory(buf, val)
 end
 
 local function publishStatus()
+    local currentDev = if isDirty or isMutating then pendingState else deviceState
     noctalia.state.set("status", {
         available = isAvailable,
         device = {
-            enabled = deviceState.enabled,
-            saturation = deviceState.saturation,
-            contrast = deviceState.contrast,
-            brightness = deviceState.brightness,
+            enabled = currentDev.enabled,
+            saturation = currentDev.saturation,
+            contrast = currentDev.contrast,
+            brightness = currentDev.brightness,
         },
         telemetry = {
             card = telemetryState.card,
@@ -129,16 +130,21 @@ local function pollStatus(onComplete)
                 -- Safely parse device state with fallback defaults
                 local dev = parsed.device
                 if type(dev) == "table" then
-                    deviceState.enabled = if type(dev.enabled) == "number" then dev.enabled else 1
-                    deviceState.saturation = if type(dev.saturation) == "number" then dev.saturation else 100
-                    deviceState.contrast = if type(dev.contrast) == "number" then dev.contrast else 100
-                    deviceState.brightness = if type(dev.brightness) == "number" then dev.brightness else 0
+                    local hwEnabled = if type(dev.enabled) == "number" then dev.enabled else 1
+                    local hwSat = if type(dev.saturation) == "number" then dev.saturation else 100
+                    local hwCon = if type(dev.contrast) == "number" then dev.contrast else 100
+                    local hwBri = if type(dev.brightness) == "number" then dev.brightness else 0
 
-                    if not isDirty then
-                        pendingState.enabled = deviceState.enabled
-                        pendingState.saturation = deviceState.saturation
-                        pendingState.contrast = deviceState.contrast
-                        pendingState.brightness = deviceState.brightness
+                    if not isDirty and not isMutating then
+                        deviceState.enabled = hwEnabled
+                        deviceState.saturation = hwSat
+                        deviceState.contrast = hwCon
+                        deviceState.brightness = hwBri
+
+                        pendingState.enabled = hwEnabled
+                        pendingState.saturation = hwSat
+                        pendingState.contrast = hwCon
+                        pendingState.brightness = hwBri
                     end
                 end
 
@@ -218,6 +224,8 @@ local function flushSetCommand()
     local bri = pendingState.brightness
     local en = pendingState.enabled
 
+    publishStatus()
+
     local cmd = `prisma-ctl set -s {sat} -c {con} -b {bri} -e {en}`
     noctalia.runAsync(cmd, function(result)
         isMutating = false
@@ -231,6 +239,7 @@ local function flushSetCommand()
             lastErrorMessage = noctalia.string.trim(result.stderr or result.stdout or "Falha ao aplicar parâmetros")
             log(`Erro ao aplicar comando set: {lastErrorMessage}`)
         end
+        publishStatus()
         pollStatus()
     end)
 end
@@ -251,6 +260,8 @@ local function handleCommand(cmd)
         if type(cmd.enabled) == "number" then
             pendingState.enabled = if cmd.enabled ~= 0 then 1 else 0
         end
+
+        publishStatus()
 
         if cmd.immediate then
             flushSetCommand()

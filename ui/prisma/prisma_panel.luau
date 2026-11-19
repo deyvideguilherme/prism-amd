@@ -5,6 +5,7 @@
 
 local currentTab = "performance" -- "performance" | "color" | "profiles"
 local newProfileName = ""
+local hasPendingColorUpdate = false
 
 -- Cached local state to provide instant feedback before service roundtrips
 local localDevice = {
@@ -26,6 +27,7 @@ local function sendCommand(cmd)
 end
 
 local function sendColorUpdate(immediate)
+    hasPendingColorUpdate = true
     sendCommand({
         action = "set",
         enabled = localDevice.enabled,
@@ -438,6 +440,7 @@ local function profilesView()
             local bri = p.brightness or 0
 
             local onApply = function()
+                hasPendingColorUpdate = false
                 sendCommand({ action = "profile_apply", name = name })
             end
 
@@ -506,10 +509,17 @@ render = function()
     -- Sync local state with status
     if statusData and statusData.device then
         local dev = statusData.device
-        localDevice.enabled = if type(dev.enabled) == "number" then dev.enabled else 1
-        localDevice.saturation = if type(dev.saturation) == "number" then dev.saturation else 100
-        localDevice.contrast = if type(dev.contrast) == "number" then dev.contrast else 100
-        localDevice.brightness = if type(dev.brightness) == "number" then dev.brightness else 0
+        if not hasPendingColorUpdate then
+            localDevice.enabled = if type(dev.enabled) == "number" then dev.enabled else 1
+            localDevice.saturation = if type(dev.saturation) == "number" then dev.saturation else 100
+            localDevice.contrast = if type(dev.contrast) == "number" then dev.contrast else 100
+            localDevice.brightness = if type(dev.brightness) == "number" then dev.brightness else 0
+        elseif dev.saturation == localDevice.saturation and
+               dev.contrast == localDevice.contrast and
+               dev.brightness == localDevice.brightness and
+               dev.enabled == localDevice.enabled then
+            hasPendingColorUpdate = false
+        end
     end
 
     -- Header row
@@ -717,6 +727,7 @@ function onRefreshProfilesClicked()
 end
 
 function onResetDefaultsClicked()
+    hasPendingColorUpdate = false
     sendCommand({ action = "profile_reset" })
 end
 
