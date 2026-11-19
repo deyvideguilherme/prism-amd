@@ -1,0 +1,14 @@
+id = "deyvideguilherme/prisma"
+name = "Prisma Control Center"
+version = "1.0.0"
+plugin_api = 36
+author = "Deyvide Guilherme"
+license = "MIT"
+dependencies = ["prisma-ctl"]
+tags = ["display", "color", "gpu", "hardware", "amd"]
+icon = "palette"
+description = "Central de controle visual de cor em hardware e telemetria para GPUs AMD no Noctalia Shell."
+
+[[service]]
+id = "service"
+entry = "prisma_service.luau"

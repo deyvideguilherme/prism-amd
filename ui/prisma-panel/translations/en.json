@@ -1,0 +1,19 @@
+{
+  "name": "Prisma Control Center",
+  "description": "Hardware display & color control center for AMD GPUs.",
+  "settings": {
+    "bar_metric": {
+      "label": "Bar Metric",
+      "description": "Which sensor to display on the bar indicator",
+      "options": {
+        "hotspot": "Hotspot Temperature (°C)",
+        "edge": "Edge Temperature (°C)",
+        "gpu_busy": "GPU Load (%)"
+      }
+    },
+    "hide_inactive": {
+      "label": "Hide when inactive",
+      "description": "Hide the bar widget when the chroma_amd module is not loaded"
+    }
+  }
+}
