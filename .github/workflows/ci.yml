@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  userspace:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test the standard CLI
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          cmake --build build --parallel
+          cmake --build build --target test_kernel_abi
+          ctest --test-dir build --output-on-failure
+          cmake --install build --prefix "$RUNNER_TEMP/prisma"
+          "$RUNNER_TEMP/prisma/bin/prisma-ctl" --version
+      - name: Analyze C++ and test both legacy builds
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy libdrm-dev libvulkan-dev glslang-tools
+          clang-tidy -p build --checks='-*,clang-analyzer-*' --warnings-as-errors='clang-analyzer-*' src/cli/*.cpp
+          cmake -S . -B build-legacy -DCMAKE_BUILD_TYPE=Release -DPRISMA_BUILD_LEGACY_DRM=ON -DPRISMA_BUILD_LEGACY_VULKAN=ON
+          cmake --build build-legacy --parallel
+          cmake --build build-legacy --target test_vkms_ctm
+          ctest --test-dir build-legacy --output-on-failure
+      - name: Validate Noctalia plugin
+        run: |
+          mkdir -p "$RUNNER_TEMP/luau"
+          curl --fail --location --silent --show-error https://github.com/luau-lang/luau/releases/download/0.747/luau-ubuntu.zip -o "$RUNNER_TEMP/luau.zip"
+          echo "6a740240248e872815865a2cb03b0c327f24939478f1d0081a0540cdfd77fdaa  $RUNNER_TEMP/luau.zip" | sha256sum -c
+          unzip -q "$RUNNER_TEMP/luau.zip" -d "$RUNNER_TEMP/luau"
+          "$RUNNER_TEMP/luau/luau-compile" --null ui/prisma/*.luau
+          python3 tests/check_ui.py
+
+  arch-package:
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    steps:
+      - run: pacman -Syu --noconfirm git cmake gcc dkms
+      - uses: actions/checkout@v4
+      - name: Build and check the Arch package
+        run: |
+          useradd --create-home builder
+          cp -a . /tmp/prisma
+          chown -R builder:builder /tmp/prisma
+          cd /tmp/prisma/packaging/arch
+          test ! -x /usr/bin/glslangValidator
+          test ! -x /usr/bin/glslc
+          runuser -u builder -- makepkg --printsrcinfo | diff -u .SRCINFO -
+          runuser -u builder -- makepkg
+          archive=$(runuser -u builder -- makepkg --packagelist | sed -n '1p')
+          bsdtar -tf "$archive" > /tmp/package-files
+          grep -Fx usr/bin/prisma-ctl /tmp/package-files
+          grep -Fx usr/lib/udev/rules.d/70-chroma-amd.rules /tmp/package-files
+          grep -E '^usr/src/chroma-amd-[^/]+/chroma_amd.c$' /tmp/package-files
+          grep -Fx usr/share/prisma-control-center/ui/prisma/plugin.toml /tmp/package-files
+
+  kernel:
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    strategy:
+      fail-fast: false
+      matrix:
+        headers: [linux-headers, linux-lts-headers]
+    steps:
+      - run: pacman -Syu --noconfirm git gcc clang llvm lld pahole ${{ matrix.headers }}
+      - uses: actions/checkout@v4
+      - name: Build the external module
+        run: |
+          headers=$(find /usr/lib/modules -mindepth 2 -maxdepth 2 -type d -name build -print -quit)
+          test -n "$headers"
+          make -C kernel KDIR="$headers" W=1 -j2
+          modinfo ./kernel/chroma_amd.ko
