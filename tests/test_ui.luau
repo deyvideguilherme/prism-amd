@@ -294,13 +294,14 @@ local function appendHistory(buf, val)
 end
 
 local function publishStatus()
+    local currentDev = if isDirty or isMutating then pendingState else deviceState
     noctalia.state.set("status", {
         available = isAvailable,
         device = {
-            enabled = deviceState.enabled,
-            saturation = deviceState.saturation,
-            contrast = deviceState.contrast,
-            brightness = deviceState.brightness,
+            enabled = currentDev.enabled,
+            saturation = currentDev.saturation,
+            contrast = currentDev.contrast,
+            brightness = currentDev.brightness,
         },
         telemetry = {
             card = telemetryState.card,
@@ -346,16 +347,21 @@ local function pollStatus(onComplete)
                 -- Safely parse device state with fallback defaults
                 local dev = parsed.device
                 if type(dev) == "table" then
-                    deviceState.enabled = if type(dev.enabled) == "number" then dev.enabled else 1
-                    deviceState.saturation = if type(dev.saturation) == "number" then dev.saturation else 100
-                    deviceState.contrast = if type(dev.contrast) == "number" then dev.contrast else 100
-                    deviceState.brightness = if type(dev.brightness) == "number" then dev.brightness else 0
+                    local hwEnabled = if type(dev.enabled) == "number" then dev.enabled else 1
+                    local hwSat = if type(dev.saturation) == "number" then dev.saturation else 100
+                    local hwCon = if type(dev.contrast) == "number" then dev.contrast else 100
+                    local hwBri = if type(dev.brightness) == "number" then dev.brightness else 0
 
-                    if not isDirty then
-                        pendingState.enabled = deviceState.enabled
-                        pendingState.saturation = deviceState.saturation
-                        pendingState.contrast = deviceState.contrast
-                        pendingState.brightness = deviceState.brightness
+                    if not isDirty and not isMutating then
+                        deviceState.enabled = hwEnabled
+                        deviceState.saturation = hwSat
+                        deviceState.contrast = hwCon
+                        deviceState.brightness = hwBri
+
+                        pendingState.enabled = hwEnabled
+                        pendingState.saturation = hwSat
+                        pendingState.contrast = hwCon
+                        pendingState.brightness = hwBri
                     end
                 end
 
@@ -435,6 +441,8 @@ local function flushSetCommand()
     local bri = pendingState.brightness
     local en = pendingState.enabled
 
+    publishStatus()
+
     local cmd = `prisma-ctl set -s {sat} -c {con} -b {bri} -e {en}`
     noctalia.runAsync(cmd, function(result)
         isMutating = false
@@ -448,6 +456,7 @@ local function flushSetCommand()
             lastErrorMessage = noctalia.string.trim(result.stderr or result.stdout or "Falha ao aplicar parâmetros")
             log(`Erro ao aplicar comando set: {lastErrorMessage}`)
         end
+        publishStatus()
         pollStatus()
     end)
 end
@@ -468,6 +477,8 @@ local function handleCommand(cmd)
         if type(cmd.enabled) == "number" then
             pendingState.enabled = if cmd.enabled ~= 0 then 1 else 0
         end
+
+        publishStatus()
 
         if cmd.immediate then
             flushSetCommand()
@@ -566,7 +577,6 @@ noctalia.state.watch("command", handleCommand)
 pollStatus(function()
     refreshProfiles()
 end)
-
 ]==],
         widget = [==[--!nonstrict
 -- Prisma Control Center - Bar Widget Indicator
@@ -655,7 +665,6 @@ end)
 -- Initial presentation
 currentStatus = noctalia.state.get("status")
 updateDisplay()
-
 ]==],
         panel = [==[--!nonstrict
 -- Prisma Control Center - Interactive Desktop Panel
@@ -664,6 +673,7 @@ updateDisplay()
 
 local currentTab = "performance" -- "performance" | "color" | "profiles"
 local newProfileName = ""
+local hasPendingColorUpdate = false
 
 -- Cached local state to provide instant feedback before service roundtrips
 local localDevice = {
@@ -685,6 +695,7 @@ local function sendCommand(cmd)
 end
 
 local function sendColorUpdate(immediate)
+    hasPendingColorUpdate = true
     sendCommand({
         action = "set",
         enabled = localDevice.enabled,
@@ -1097,6 +1108,7 @@ local function profilesView()
             local bri = p.brightness or 0
 
             local onApply = function()
+                hasPendingColorUpdate = false
                 sendCommand({ action = "profile_apply", name = name })
             end
 
@@ -1165,10 +1177,17 @@ render = function()
     -- Sync local state with status
     if statusData and statusData.device then
         local dev = statusData.device
-        localDevice.enabled = if type(dev.enabled) == "number" then dev.enabled else 1
-        localDevice.saturation = if type(dev.saturation) == "number" then dev.saturation else 100
-        localDevice.contrast = if type(dev.contrast) == "number" then dev.contrast else 100
-        localDevice.brightness = if type(dev.brightness) == "number" then dev.brightness else 0
+        if not hasPendingColorUpdate then
+            localDevice.enabled = if type(dev.enabled) == "number" then dev.enabled else 1
+            localDevice.saturation = if type(dev.saturation) == "number" then dev.saturation else 100
+            localDevice.contrast = if type(dev.contrast) == "number" then dev.contrast else 100
+            localDevice.brightness = if type(dev.brightness) == "number" then dev.brightness else 0
+        elseif dev.saturation == localDevice.saturation and
+               dev.contrast == localDevice.contrast and
+               dev.brightness == localDevice.brightness and
+               dev.enabled == localDevice.enabled then
+            hasPendingColorUpdate = false
+        end
     end
 
     -- Header row
@@ -1376,6 +1395,7 @@ function onRefreshProfilesClicked()
 end
 
 function onResetDefaultsClicked()
+    hasPendingColorUpdate = false
     sendCommand({ action = "profile_reset" })
 end
 
@@ -1391,7 +1411,6 @@ sendCommand({ action = "panel_state", open = true })
 -- Initial render
 statusData = noctalia.state.get("status")
 render()
-
 ]==],
     }
 end
@@ -1454,6 +1473,9 @@ local mockPanel = {
 local mockState = {}
 local stateWatchers = {}
 
+local pendingAsyncCallbacks = {}
+local deferSetCommands = false
+
 local noctalia = {
     setUpdateInterval = function(intervalMs) end,
     log = function(msg) end,
@@ -1472,6 +1494,12 @@ local noctalia = {
             cb(mockStatusResponse)
         elseif string.find(cmd, "prisma-ctl profile list", 1, true) then
             cb({ exitCode = 0, stdout = "", stderr = "" })
+        elseif string.find(cmd, "prisma-ctl set", 1, true) then
+            if deferSetCommands then
+                table.insert(pendingAsyncCallbacks, { cmd = cmd, cb = cb })
+            else
+                cb({ exitCode = 0, stdout = "", stderr = "" })
+            end
         else
             cb({ exitCode = 0, stdout = "", stderr = "" })
         end
@@ -1632,5 +1660,81 @@ mockEnv.onConfigChanged()
 assert(mockBar.visible == false, "Scenario 3: mockBar.visible must be false when hide_inactive=true and hardware offline")
 assert(mockBar.text == "", "Scenario 3: mockBar.text must be empty when hardware offline, got: " .. tostring(mockBar.text))
 print("  [PASS] Scenario 3 passed.")
+
+-- Cenário 4 — Ajuste Otimista de Cor e Imunidade a Snapshots Obsoletos
+print("[test_ui] Running Scenario 4: Optimistic color update and snapshot immunity...")
+mockConfig.hide_inactive = false
+mockStatusResponse = {
+    exitCode = 0,
+    stdout = [[{"device":{"enabled":1,"saturation":100,"contrast":100,"brightness":0},"telemetry":{"card":"card1","pci_id":"0000:07:00.0","device_id":"1002:1638","is_apu":true,"gpu_busy_percent":2,"sclk_mhz":400,"vram_used_mib":455.3,"vram_total_mib":512.0,"gtt_used_mib":643.9,"gtt_total_mib":7649.9,"temp_edge_c":34.0,"temp_junction_c":null,"power_watts":25.0}}]],
+    stderr = "",
+}
+for _ = 1, 20 do
+    mockEnv.update()
+end
+mockEnv.onConfigChanged()
+
+-- Navegar para a aba de Tela & Cor
+mockEnv.onTabColor()
+local treeColor = mockPanel.tree
+assert(treeColor ~= nil, "Scenario 4: mockPanel.tree must not be nil")
+assert(hasLabelWithText(treeColor, "Calibragem de Cor em Hardware"), "Scenario 4: must navigate to 'Tela & Cor'")
+assert(hasLabelWithText(treeColor, "100%"), "Scenario 4: initial saturation must be 100%")
+
+-- Localizar os segmentos interativos do slider
+local segmentBoxes = findNodes(treeColor, function(n)
+    return n.type == "box" and type(n.props.onClick) == "function"
+end)
+assert(#segmentBoxes == 75, "Scenario 4: expected 75 interactive segment boxes across 3 parameters, found: " .. tostring(#segmentBoxes))
+
+-- Habilitar retenção assíncrona do comando prisma-ctl set
+deferSetCommands = true
+
+-- Clicar no segmento 10 da barra de saturação (targetVal = 150)
+segmentBoxes[10].props.onClick()
+
+-- Verificar atualização otimista imediata na árvore do painel (150%)
+local treeOptimistic = mockPanel.tree
+assert(hasLabelWithText(treeOptimistic, "150%"), "Scenario 4: panel must immediately show 150% without waiting for hardware")
+
+-- Verificar publicação otimista no estado global emitido pelo serviço
+local statusOptimistic = mockState["status"]
+assert(statusOptimistic ~= nil and statusOptimistic.device ~= nil, "Scenario 4: status must be published")
+assert(statusOptimistic.device.saturation == 150, "Scenario 4: status.device.saturation must be 150 immediately")
+
+-- Verificar que comando prisma-ctl set está em trânsito (in-flight)
+assert(#pendingAsyncCallbacks == 1, "Scenario 4: prisma-ctl set command must be in-flight")
+assert(string.find(pendingAsyncCallbacks[1].cmd, "prisma-ctl set -s 150", 1, true) ~= nil, "Scenario 4: command must set saturation to 150")
+
+-- Simular múltiplos ciclos de poll de background enquanto a mutação está em trânsito
+-- O hardware ainda responde o snapshot obsoleto com 100% de saturação
+for _ = 1, 10 do
+    mockEnv.update()
+end
+
+-- Assegurar que painel e status MANTÊM 150% (SEM SNAP-BACK para 100%!)
+local treeInFlight = mockPanel.tree
+assert(hasLabelWithText(treeInFlight, "150%"), "Scenario 4: panel must retain 150% without snap-back while mutation is in flight")
+local statusInFlight = mockState["status"]
+assert(statusInFlight.device.saturation == 150, "Scenario 4: status device.saturation must remain 150 while mutating")
+
+-- Concluir a mutação em hardware e atualizar resposta do mock
+mockStatusResponse = {
+    exitCode = 0,
+    stdout = [[{"device":{"enabled":1,"saturation":150,"contrast":100,"brightness":0},"telemetry":{"card":"card1","pci_id":"0000:07:00.0","device_id":"1002:1638","is_apu":true,"gpu_busy_percent":2,"sclk_mhz":400,"vram_used_mib":455.3,"vram_total_mib":512.0,"gtt_used_mib":643.9,"gtt_total_mib":7649.9,"temp_edge_c":34.0,"temp_junction_c":null,"power_watts":25.0}}]],
+    stderr = "",
+}
+
+local inFlightCmd = table.remove(pendingAsyncCallbacks, 1)
+deferSetCommands = false
+inFlightCmd.cb({ exitCode = 0, stdout = "", stderr = "" })
+
+-- Verificar reconciliação final após conclusão do hardware
+for _ = 1, 5 do
+    mockEnv.update()
+end
+assert(hasLabelWithText(mockPanel.tree, "150%"), "Scenario 4: panel must remain at 150% after hardware completion")
+assert(mockState["status"].device.saturation == 150, "Scenario 4: status must be 150 after hardware completion")
+print("  [PASS] Scenario 4 passed.")
 
 print("All Luau UI behavioral tests PASSED successfully!")
