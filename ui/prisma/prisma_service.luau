@@ -1,28 +1,19 @@
 --!nonstrict
--- Prisma Control Center - Headless Telemetry, Hardware & Automation Service
--- Manages background polling of AMD GPU hardware telemetry, color parameters,
--- maintains historical ring-buffers, debounces mutations, manages profiles,
--- and handles dynamic open window discovery and automatic per-game profile switching.
+-- Prisma Control Center - Headless Telemetry & Hardware Service
+-- Manages background polling of AMD GPU hardware telemetry and color parameters,
+-- maintains historical ring-buffers, debounces mutations, and handles profile management.
 
 noctalia.setUpdateInterval(50)
 
-local TICKS_ACTIVE = 20    -- 20 * 50ms = 1000ms (1s) when panel is open / window polling
+local TICKS_ACTIVE = 20    -- 20 * 50ms = 1000ms (1s) when panel is open
 local TICKS_IDLE = 100     -- 100 * 50ms = 5000ms (5s) in background
 local DEBOUNCE_TICKS = 1   -- 1 * 50ms = 50ms debounce window for slider adjustments
 local MAX_HISTORY = 60
-
-local PRESETS = {
-    padrao = { saturation = 100, contrast = 100, brightness = 0, enabled = 1 },
-    competitivo = { saturation = 160, contrast = 115, brightness = 10, enabled = 1 },
-    cinema = { saturation = 120, contrast = 105, brightness = -5, enabled = 1 },
-    monocromatico = { saturation = 0, contrast = 110, brightness = 0, enabled = 1 },
-}
 
 local tickCount = 0
 local panelOpen = false
 local isPolling = false
 local isMutating = false
-local isQueryingWindows = false
 
 local isAvailable = false
 local deviceState = {
@@ -63,18 +54,6 @@ local pendingState = {
     brightness = 0,
 }
 
--- Game auto-switching, open windows discovery & app rules
-local openApps = {}
-local focusedAppId = ""
-local focusedAppTitle = ""
-local autoSwitchEnabled = true
-local appRules = {}
-local activeAutoProfile = nil
-local fallbackState = nil
-
-local configDir = (noctalia.getenv("XDG_CONFIG_HOME") or ((noctalia.getenv("HOME") or "") .. "/.config")) .. "/prisma"
-local rulesFilePath = configDir .. "/app_rules.json"
-
 local function log(msg)
     noctalia.log(`prisma_service: {msg}`)
 end
@@ -94,47 +73,8 @@ local function appendHistory(buf, val)
     end
 end
 
-local function loadAppRules()
-    local contents = noctalia.readFile(rulesFilePath)
-    if contents and contents ~= "" then
-        local ok, parsed = pcall(function()
-            return noctalia.json.decode(contents)
-        end)
-        if ok and type(parsed) == "table" then
-            if type(parsed.auto_switch) == "boolean" then
-                autoSwitchEnabled = parsed.auto_switch
-            end
-            if type(parsed.rules) == "table" then
-                appRules = parsed.rules
-            else
-                local found = {}
-                for k, v in pairs(parsed) do
-                    if k ~= "auto_switch" and type(v) == "table" then
-                        found[k] = v
-                    end
-                end
-                appRules = found
-            end
-        end
-    end
-end
-
-local function saveAppRules()
-    noctalia.mkdirAll(configDir)
-    local data = {
-        auto_switch = autoSwitchEnabled,
-        rules = appRules,
-    }
-    local ok, encoded = pcall(function()
-        return noctalia.json.encode(data)
-    end)
-    if ok and type(encoded) == "string" then
-        noctalia.writeFile(rulesFilePath, encoded)
-    end
-end
-
 local function publishStatus()
-    local status = {
+    noctalia.state.set("status", {
         available = isAvailable,
         device = {
             enabled = deviceState.enabled,
@@ -163,37 +103,7 @@ local function publishStatus()
         profiles = savedProfiles,
         panel_open = panelOpen,
         error = if lastErrorMessage ~= "" then lastErrorMessage else nil,
-        openApps = openApps,
-        focusedAppId = focusedAppId,
-        focusedAppTitle = focusedAppTitle,
-        autoSwitchEnabled = autoSwitchEnabled,
-        appRules = appRules,
-        activeAutoProfile = activeAutoProfile,
-    }
-
-    noctalia.state.set("status", status)
-    noctalia.state.set("openApps", openApps)
-    noctalia.state.set("focusedAppId", focusedAppId)
-    noctalia.state.set("focusedAppTitle", focusedAppTitle)
-    noctalia.state.set("autoSwitchEnabled", autoSwitchEnabled)
-    noctalia.state.set("appRules", appRules)
-    noctalia.state.set("activeAutoProfile", activeAutoProfile)
-end
-
-local function applyProfileByName(profileName, callback)
-    local lower = string.lower(profileName)
-    local preset = PRESETS[lower]
-    if preset then
-        local cmd = `prisma-ctl set -s {preset.saturation} -c {preset.contrast} -b {preset.brightness} -e {preset.enabled}`
-        noctalia.runAsync(cmd, function(result)
-            if callback then callback(result.exitCode == 0) end
-        end)
-    else
-        local cmd = `prisma-ctl profile apply {shellQuote(profileName)}`
-        noctalia.runAsync(cmd, function(result)
-            if callback then callback(result.exitCode == 0) end
-        end)
-    end
+    })
 end
 
 local function pollStatus(onComplete)
@@ -287,161 +197,6 @@ local function refreshProfiles()
     end)
 end
 
-local function onFocusChanged(newAppId)
-    publishStatus()
-
-    if not autoSwitchEnabled then
-        return
-    end
-
-    local rule = appRules[newAppId]
-    if rule and type(rule.profile) == "string" and rule.profile ~= "" then
-        local targetProfile = rule.profile
-        if activeAutoProfile ~= targetProfile then
-            if activeAutoProfile == nil then
-                -- Store desktop calibration before entering game profile
-                fallbackState = {
-                    saturation = deviceState.saturation,
-                    contrast = deviceState.contrast,
-                    brightness = deviceState.brightness,
-                    enabled = deviceState.enabled,
-                }
-            end
-            activeAutoProfile = targetProfile
-            log(`Troca automática para perfil '{targetProfile}' (aplicativo: {newAppId})`)
-            applyProfileByName(targetProfile, function()
-                pollStatus()
-            end)
-        end
-    else
-        -- Unmapped app or desktop
-        if activeAutoProfile ~= nil then
-            log(`Saindo do modo de jogo ({activeAutoProfile}), restaurando calibragem anterior`)
-            activeAutoProfile = nil
-            if fallbackState ~= nil then
-                local sat = fallbackState.saturation or 100
-                local con = fallbackState.contrast or 100
-                local bri = fallbackState.brightness or 0
-                local en = fallbackState.enabled or 1
-                fallbackState = nil
-                local cmd = `prisma-ctl set -s {sat} -c {con} -b {bri} -e {en}`
-                noctalia.runAsync(cmd, function()
-                    pollStatus()
-                end)
-            else
-                noctalia.runAsync("prisma-ctl profile reset", function()
-                    pollStatus()
-                end)
-            end
-        end
-    end
-end
-
-local function pollWindows()
-    if isQueryingWindows then return end
-    isQueryingWindows = true
-
-    noctalia.runAsync("niri msg --json windows", function(result)
-        isQueryingWindows = false
-        if result.exitCode == 0 and type(result.stdout) == "string" and result.stdout ~= "" then
-            local ok, parsed = pcall(function()
-                return noctalia.json.decode(result.stdout)
-            end)
-
-            if ok and type(parsed) == "table" then
-                local detectedFocusedAppId = nil
-                local detectedFocusedAppTitle = nil
-                local appsMap = {}
-
-                for _, win in ipairs(parsed) do
-                    if type(win) == "table" and type(win.app_id) == "string" and win.app_id ~= "" then
-                        local appId = win.app_id
-                        local lowerId = string.lower(appId)
-                        -- Filter internal shell and plugin components
-                        if lowerId:find("noctalia") == nil and lowerId:find("prisma") == nil then
-                            local title = if type(win.title) == "string" and win.title ~= "" then win.title else appId
-                            local isFocused = (win.is_focused == true)
-
-                            if isFocused then
-                                detectedFocusedAppId = appId
-                                detectedFocusedAppTitle = title
-                            end
-
-                            local existing = appsMap[appId]
-                            if existing == nil then
-                                appsMap[appId] = {
-                                    app_id = appId,
-                                    title = title,
-                                    is_focused = isFocused,
-                                }
-                            else
-                                if isFocused then
-                                    existing.is_focused = true
-                                    existing.title = title
-                                end
-                            end
-                        end
-                    end
-                end
-
-                local list = {}
-                for _, item in pairs(appsMap) do
-                    table.insert(list, item)
-                end
-
-                -- Sort: focused window first, then alphabetically by title / app_id
-                table.sort(list, function(a, b)
-                    if a.is_focused ~= b.is_focused then
-                        return a.is_focused == true
-                    end
-                    local titleA = string.lower(a.title or a.app_id)
-                    local titleB = string.lower(b.title or b.app_id)
-                    return titleA < titleB
-                end)
-
-                openApps = list
-
-                if detectedFocusedAppId ~= nil then
-                    local changed = (detectedFocusedAppId ~= focusedAppId)
-                    focusedAppId = detectedFocusedAppId
-                    focusedAppTitle = if type(detectedFocusedAppTitle) == "string" and detectedFocusedAppTitle ~= ""
-                        then detectedFocusedAppTitle
-                        else detectedFocusedAppId
-
-                    if changed then
-                        onFocusChanged(detectedFocusedAppId)
-                    else
-                        publishStatus()
-                    end
-                else
-                    if #list == 0 and activeAutoProfile ~= nil then
-                        -- All windows closed, restore fallback state
-                        log("Nenhuma janela aberta detectada, restaurando calibragem anterior")
-                        activeAutoProfile = nil
-                        if fallbackState ~= nil then
-                            local sat = fallbackState.saturation or 100
-                            local con = fallbackState.contrast or 100
-                            local bri = fallbackState.brightness or 0
-                            local en = fallbackState.enabled or 1
-                            fallbackState = nil
-                            local setCmd = `prisma-ctl set -s {sat} -c {con} -b {bri} -e {en}`
-                            noctalia.runAsync(setCmd, function()
-                                pollStatus()
-                            end)
-                        else
-                            noctalia.runAsync("prisma-ctl profile reset", function()
-                                pollStatus()
-                            end)
-                        end
-                    else
-                        publishStatus()
-                    end
-                end
-            end
-        end
-    end)
-end
-
 local function flushSetCommand()
     if isMutating then return end
     isDirty = false
@@ -510,12 +265,12 @@ local function handleCommand(cmd)
     elseif cmd.action == "profile_apply" then
         local name = cmd.name
         if type(name) == "string" and name ~= "" then
-            applyProfileByName(name, function(ok)
-                if ok then
+            noctalia.runAsync(`prisma-ctl profile apply {shellQuote(name)}`, function(result)
+                if result.exitCode == 0 then
                     lastErrorMessage = ""
                     pollStatus()
                 else
-                    lastErrorMessage = "Falha ao aplicar perfil"
+                    lastErrorMessage = noctalia.string.trim(result.stderr or "Falha ao aplicar perfil")
                     publishStatus()
                 end
             end)
@@ -536,8 +291,6 @@ local function handleCommand(cmd)
         end
 
     elseif cmd.action == "profile_reset" then
-        activeAutoProfile = nil
-        fallbackState = nil
         noctalia.runAsync("prisma-ctl profile reset", function(result)
             if result.exitCode == 0 then
                 lastErrorMessage = ""
@@ -556,61 +309,6 @@ local function handleCommand(cmd)
         if panelOpen then
             pollStatus()
             refreshProfiles()
-            pollWindows()
-        end
-
-    elseif cmd.action == "toggle_auto_switch" then
-        autoSwitchEnabled = not autoSwitchEnabled
-        saveAppRules()
-        if autoSwitchEnabled then
-            if focusedAppId ~= "" then
-                onFocusChanged(focusedAppId)
-            end
-        else
-            if activeAutoProfile ~= nil then
-                activeAutoProfile = nil
-                if fallbackState ~= nil then
-                    local sat = fallbackState.saturation or 100
-                    local con = fallbackState.contrast or 100
-                    local bri = fallbackState.brightness or 0
-                    local en = fallbackState.enabled or 1
-                    fallbackState = nil
-                    local setCmd = `prisma-ctl set -s {sat} -c {con} -b {bri} -e {en}`
-                    noctalia.runAsync(setCmd, function()
-                        pollStatus()
-                    end)
-                end
-            end
-        end
-        publishStatus()
-
-    elseif cmd.action == "link_app_rule" then
-        local appId = cmd.app_id
-        local prof = cmd.profile
-        if type(appId) == "string" and appId ~= "" and type(prof) == "string" and prof ~= "" then
-            appRules[appId] = {
-                profile = prof,
-                title = if type(cmd.title) == "string" and cmd.title ~= "" then cmd.title else appId,
-            }
-            saveAppRules()
-            if autoSwitchEnabled and (focusedAppId == appId or cmd.apply_now == true) then
-                activeAutoProfile = nil -- Force re-evaluation
-                onFocusChanged(appId)
-            else
-                publishStatus()
-            end
-        end
-
-    elseif cmd.action == "unlink_app_rule" then
-        local appId = cmd.app_id
-        if type(appId) == "string" and appRules[appId] ~= nil then
-            appRules[appId] = nil
-            saveAppRules()
-            if autoSwitchEnabled and focusedAppId == appId then
-                onFocusChanged(appId)
-            else
-                publishStatus()
-            end
         end
     end
 end
@@ -626,12 +324,7 @@ function update()
         end
     end
 
-    -- Query open windows every 1s (20 ticks)
-    if tickCount % TICKS_ACTIVE == 0 then
-        pollWindows()
-    end
-
-    -- Periodic hardware telemetry polling interval
+    -- Periodic polling interval
     local interval = if panelOpen then TICKS_ACTIVE else TICKS_IDLE
     if tickCount % interval == 0 then
         pollStatus()
@@ -641,9 +334,7 @@ end
 -- Listen for commands from the widget or interactive panel
 noctalia.state.watch("command", handleCommand)
 
--- Initial probe, load saved app rules and profiles
-loadAppRules()
+-- Initial probe and load
 pollStatus(function()
     refreshProfiles()
-    pollWindows()
 end)
