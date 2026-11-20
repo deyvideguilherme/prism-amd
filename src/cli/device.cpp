@@ -207,6 +207,25 @@ DeviceState read_device_state(const std::string& dev_path) {
     return parse_state_buffer(std::string_view(buf, bytes_read));
 }
 
+bool is_device_available(const std::string& dev_path) {
+    FileDescriptor fd(::open(dev_path.c_str(), O_RDONLY | O_CLOEXEC));
+    return fd.get() >= 0;
+}
+
+std::optional<DeviceState> try_read_device_state(
+    const std::string& dev_path,
+    std::string* error_msg
+) {
+    try {
+        return read_device_state(dev_path);
+    } catch (const DeviceError& e) {
+        if (error_msg) {
+            *error_msg = e.what();
+        }
+        return std::nullopt;
+    }
+}
+
 void write_device_params(
     const std::optional<int>& saturation,
     const std::optional<int>& contrast,

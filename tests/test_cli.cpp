@@ -113,6 +113,12 @@ void test_device_parser() {
     }
     assert(caught && "Enabled != 0|1 must throw");
 
+    // Test device availability checking
+    assert(!is_device_available("/nonexistent_chroma_path"));
+    std::string err_msg;
+    assert(!try_read_device_state("/nonexistent_chroma_path", &err_msg).has_value());
+    assert(!err_msg.empty());
+
     std::cout << "  [PASS] Test 1: Device State Parser & Validation passed.\n";
 }
 
@@ -264,6 +270,12 @@ void test_telemetry_parser() {
 
     telem.device_id = "AMD\"\\example\n";
     assert(format_telemetry_json(telem).find(R"(AMD\"\\example\u000a)") != std::string::npos);
+
+    telem.gpu_name = "AMD Radeon RX 9060 XT";
+    telem.gpu_type = "dGPU";
+    assert(format_telemetry_json(telem).find("\"gpu_name\": \"AMD Radeon RX 9060 XT\"") != std::string::npos);
+    assert(format_telemetry_json(telem).find("\"gpu_type\": \"dGPU\"") != std::string::npos);
+
     std::cout << "  [PASS] Test 2: SCLK & Mocked Sysfs/HWMON Telemetry Parser passed.\n";
 }
 

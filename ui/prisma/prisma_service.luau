@@ -16,6 +16,7 @@ local isPolling = false
 local isMutating = false
 
 local isAvailable = false
+local isDeviceAvailable = false
 local deviceState = {
     enabled = 1,
     saturation = 100,
@@ -26,6 +27,8 @@ local telemetryState = {
     card = "",
     pci_id = "",
     device_id = "",
+    gpu_name = "",
+    gpu_type = "",
     is_apu = false,
     gpu_busy_percent = 0,
     sclk_mhz = 0,
@@ -80,8 +83,10 @@ local function publishStatus()
     local currentDev = if isDirty or isMutating then pendingState else deviceState
     noctalia.state.set("status", {
         available = isAvailable,
+        device_available = isDeviceAvailable,
         device = {
-            enabled = currentDev.enabled,
+            available = isDeviceAvailable,
+            enabled = if isDeviceAvailable then currentDev.enabled else 0,
             saturation = currentDev.saturation,
             contrast = currentDev.contrast,
             brightness = currentDev.brightness,
@@ -90,6 +95,8 @@ local function publishStatus()
             card = telemetryState.card,
             pci_id = telemetryState.pci_id,
             device_id = telemetryState.device_id,
+            gpu_name = telemetryState.gpu_name,
+            gpu_type = telemetryState.gpu_type,
             is_apu = telemetryState.is_apu,
             gpu_busy_percent = telemetryState.gpu_busy_percent,
             sclk_mhz = telemetryState.sclk_mhz,
@@ -130,6 +137,11 @@ local function pollStatus(onComplete)
                 -- Safely parse device state with fallback defaults
                 local dev = parsed.device
                 if type(dev) == "table" then
+                    if dev.available ~= nil then
+                        isDeviceAvailable = (dev.available == true)
+                    else
+                        isDeviceAvailable = true
+                    end
                     local hwEnabled = if type(dev.enabled) == "number" then dev.enabled else 1
                     local hwSat = if type(dev.saturation) == "number" then dev.saturation else 100
                     local hwCon = if type(dev.contrast) == "number" then dev.contrast else 100
@@ -146,6 +158,8 @@ local function pollStatus(onComplete)
                         pendingState.contrast = hwCon
                         pendingState.brightness = hwBri
                     end
+                else
+                    isDeviceAvailable = false
                 end
 
                 -- Safely parse hardware telemetry handling nulls
@@ -154,6 +168,8 @@ local function pollStatus(onComplete)
                     telemetryState.card = if type(telem.card) == "string" and telem.card ~= "" then telem.card else "amdgpu"
                     telemetryState.pci_id = if type(telem.pci_id) == "string" then telem.pci_id else ""
                     telemetryState.device_id = if type(telem.device_id) == "string" then telem.device_id else ""
+                    telemetryState.gpu_name = if type(telem.gpu_name) == "string" then telem.gpu_name else ""
+                    telemetryState.gpu_type = if type(telem.gpu_type) == "string" then telem.gpu_type else ""
                     telemetryState.is_apu = (telem.is_apu == true)
                     telemetryState.gpu_busy_percent = if type(telem.gpu_busy_percent) == "number" then telem.gpu_busy_percent else 0
                     telemetryState.sclk_mhz = if type(telem.sclk_mhz) == "number" then telem.sclk_mhz else 0
@@ -216,6 +232,11 @@ end
 
 local function flushSetCommand()
     if isMutating then return end
+    if not isDeviceAvailable then
+        isDirty = false
+        publishStatus()
+        return
+    end
     isDirty = false
     isMutating = true
 

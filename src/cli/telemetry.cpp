@@ -63,6 +63,8 @@ std::vector<std::filesystem::path> read_directory(const std::filesystem::path& d
     return result;
 }
 
+} // namespace
+
 std::string json_string(std::string_view value) {
     if (value.empty()) return "null";
 
@@ -80,8 +82,6 @@ std::string json_string(std::string_view value) {
     }
     return result + '"';
 }
-
-} // namespace
 
 std::optional<std::filesystem::path> find_amd_gpu_path(const std::filesystem::path& drm_root) {
     std::error_code ec;
@@ -261,6 +261,46 @@ GpuTelemetry read_gpu_telemetry(const std::filesystem::path& drm_root) {
         telem.is_apu = true;
     }
 
+    // GPU Name / Model and Type detection
+    std::string hex_id;
+    if (telem.device_id.starts_with("1002:") || telem.device_id.starts_with("0x1002:")) {
+        auto colon = telem.device_id.find(':');
+        hex_id = telem.device_id.substr(colon + 1);
+    } else if (telem.device_id.starts_with("0x")) {
+        hex_id = telem.device_id.substr(2);
+    } else {
+        hex_id = telem.device_id;
+    }
+
+    uint32_t pci_num = 0;
+    try {
+        if (!hex_id.empty()) {
+            pci_num = std::stoul(hex_id, nullptr, 16);
+        }
+    } catch (...) {}
+
+    if (pci_num == 0x7590 || pci_num == 0x7591) {
+        telem.gpu_name = "AMD Radeon RX 9060 XT";
+        telem.gpu_type = "dGPU";
+        telem.is_apu = false;
+    } else if (pci_num == 0x7592 || pci_num == 0x7593) {
+        telem.gpu_name = "AMD Radeon RX 9050";
+        telem.gpu_type = "dGPU";
+        telem.is_apu = false;
+    } else if (pci_num == 0x1638 || pci_num == 0x1636) {
+        telem.gpu_name = "AMD Radeon Graphics (Cezanne)";
+        telem.gpu_type = "APU";
+        telem.is_apu = true;
+    } else {
+        if (telem.is_apu) {
+            telem.gpu_name = "AMD Radeon Graphics (APU)";
+            telem.gpu_type = "APU";
+        } else {
+            telem.gpu_name = "AMD Radeon Graphics";
+            telem.gpu_type = "dGPU";
+        }
+    }
+
     // Clock (SCLK MHz)
     if (auto sclk_str = read_file_string(dev_path / "pp_dpm_sclk")) {
         telem.sclk_mhz = parse_sclk_mhz(*sclk_str);
@@ -316,11 +356,16 @@ std::string format_telemetry_text(const GpuTelemetry& t) {
     ss << std::fixed << std::setprecision(1);
 
     ss << "GPU Hardware:       " << (t.card_name.empty() ? "N/A" : t.card_name);
-    if (!t.pci_id.empty()) {
-        ss << " (" << t.pci_id << ")";
-    }
-    if (!t.card_name.empty()) {
+    if (!t.gpu_type.empty()) {
+        ss << " [" << t.gpu_type << "]";
+    } else if (!t.card_name.empty()) {
         ss << (t.is_apu ? " [APU]" : " [dGPU]");
+    }
+    if (!t.gpu_name.empty()) {
+        ss << " (" << t.gpu_name << ")";
+    }
+    if (!t.pci_id.empty()) {
+        ss << " " << t.pci_id;
     }
     ss << "\n";
 
@@ -377,6 +422,8 @@ std::string format_telemetry_json(const GpuTelemetry& t) {
     ss << "  \"card\": " << json_string(t.card_name) << ",\n";
     ss << "  \"pci_id\": " << json_string(t.pci_id) << ",\n";
     ss << "  \"device_id\": " << json_string(t.device_id) << ",\n";
+    ss << "  \"gpu_name\": " << json_string(t.gpu_name) << ",\n";
+    ss << "  \"gpu_type\": " << json_string(t.gpu_type) << ",\n";
     ss << "  \"is_apu\": " << (t.is_apu ? "true" : "false") << ",\n";
 
     ss << "  \"gpu_busy_percent\": ";
