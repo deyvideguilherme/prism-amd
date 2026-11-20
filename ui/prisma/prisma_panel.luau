@@ -87,8 +87,14 @@ local function performanceView()
     })
 
     -- 2. Temperatures Block (Hotspot & Edge)
+    local isApu = (telem.is_apu == true) or (telem.gpu_type == "APU")
     local tempRightLabel = if hasHotspot then `Borda: {tempEdge}°C` else "Sensor Único (Borda)"
-    local tempSubtitle = if hasHotspot then "Temperatura interna máxima da GPU (Hotspot)" else "Temperatura do encapsulamento da APU (Edge)"
+    local tempSubtitle = if hasHotspot then
+        "Temperatura interna máxima da GPU (Hotspot)"
+    elseif isApu then
+        "Temperatura do encapsulamento da APU (Edge)"
+    else
+        "Temperatura da GPU (Edge)"
     local tempFill = if mainTemp > tempWarn then "error" else "secondary"
 
     local tempBlock = ui.column({ gap = 4, align = "stretch" }, {
@@ -174,7 +180,8 @@ local function performanceView()
     })
 
     -- Hardware Identity Footer Row
-    local cardDisplay = `{card} ({if isApu then "APU" else "dGPU"})`
+    local gpuName = if type(telem.gpu_name) == "string" and telem.gpu_name ~= "" then telem.gpu_name else nil
+    local cardDisplay = if gpuName then `{card} ({if isApu then "APU" else "dGPU"}) — {gpuName}` else `{card} ({if isApu then "APU" else "dGPU"})`
     local infoRow = ui.row({ align = "center", justify = "space_between" }, {
         ui.row({ gap = 12, align = "center" }, {
             ui.label({ text = cardDisplay, fontSize = 12, fontWeight = "bold", color = "on_surface" }),
@@ -228,23 +235,36 @@ local function interactiveBar(value, minVal, maxVal, isEnabled, onSelectValue)
 end
 
 local function colorView()
-    local isEnabled = (localDevice.enabled == 1)
+    local isDeviceAvailable = if statusData and statusData.device and statusData.device.available ~= nil then
+        statusData.device.available == true
+    elseif statusData and statusData.device_available ~= nil then
+        statusData.device_available == true
+    else
+        true
+
+    local isEnabled = isDeviceAvailable and (localDevice.enabled == 1)
 
     -- 1. Master Enable Toggle Row
     local masterRow = ui.row({ align = "center", justify = "space_between" }, {
         ui.column({ gap = 2, flexGrow = 1 }, {
             ui.label({ text = "Calibragem de Cor em Hardware", fontSize = 14, fontWeight = "bold" }),
             ui.label({
-                text = "Ajusta saturação, contraste e brilho diretamente na saída de vídeo da placa",
+                text = if not isDeviceAvailable then
+                    "Módulo /dev/chroma_amd não encontrado no kernel. Calibragem indisponível."
+                else
+                    "Ajusta saturação, contraste e brilho diretamente na saída de vídeo da placa",
                 fontSize = 11,
-                color = "on_surface_variant",
+                color = if not isDeviceAvailable then "error" else "on_surface_variant",
             }),
         }),
         ui.button({
-            text = if isEnabled then "Calibragem: ATIVADA" else "Calibragem: DESATIVADA",
-            glyph = if isEnabled then "check" else "x",
-            variant = if isEnabled then "primary" else "outline",
-            onClick = "onToggleMaster",
+            text = if not isDeviceAvailable then
+                "Módulo Offline"
+            else
+                (if isEnabled then "Calibragem: ATIVADA" else "Calibragem: DESATIVADA"),
+            glyph = if not isDeviceAvailable then "alert-triangle" else (if isEnabled then "check" else "x"),
+            variant = if isDeviceAvailable and isEnabled then "primary" else "outline",
+            onClick = if isDeviceAvailable then "onToggleMaster" else nil,
         }),
     })
 
