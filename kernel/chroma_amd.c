@@ -199,10 +199,15 @@ static bool chroma_is_identity_ctm(const struct drm_color_ctm *ctm)
 		return true;
 
 	for (i = 0; i < 9; ++i) {
-		u64 expected = (i == 0 || i == 4 || i == 8) ? (1ULL << 32) : 0ULL;
+		u64 val = ctm->matrix[i];
 
-		if (ctm->matrix[i] != expected)
-			return false;
+		if (i == 0 || i == 4 || i == 8) {
+			if (val != (1ULL << 32))
+				return false;
+		} else {
+			if ((val & ~(1ULL << 63)) != 0ULL)
+				return false;
+		}
 	}
 	return true;
 }

@@ -121,6 +121,19 @@ int main(int argc, char** argv) try {
 
     set_prisma(prisma, "contrast=115 brightness=-20");
     wait_for_ctm(fd, crtc, property, [first](auto blob) { return blob != 0 && blob != first; });
+
+    // Test that neutral identity matrix with signed zero is adopted by Prisma
+    drm_color_ctm neutral_identity{};
+    neutral_identity.matrix[0] = neutral_identity.matrix[4] = neutral_identity.matrix[8] = uint64_t{1} << 32;
+    neutral_identity.matrix[1] = uint64_t{1} << 63; // -0.0
+    uint32_t identity_id;
+    require(drmModeCreatePropertyBlob(fd, &neutral_identity, sizeof(neutral_identity), &identity_id) == 0,
+            "Cannot create identity CTM");
+    set_external_ctm(fd, crtc, property, identity_id);
+    set_prisma(prisma, "enabled=1 saturation=130");
+    wait_for_ctm(fd, crtc, property, [identity_id](auto blob) { return blob != 0 && blob != identity_id; });
+    require(drmModeDestroyPropertyBlob(fd, identity_id) == 0, "Cannot free identity CTM");
+
     drm_color_ctm external{};
     external.matrix[0] = external.matrix[4] = external.matrix[8] = uint64_t{1} << 31;
     uint32_t external_id;
