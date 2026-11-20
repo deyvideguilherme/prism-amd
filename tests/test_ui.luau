@@ -1737,4 +1737,41 @@ assert(hasLabelWithText(mockPanel.tree, "150%"), "Scenario 4: panel must remain 
 assert(mockState["status"].device.saturation == 150, "Scenario 4: status must be 150 after hardware completion")
 print("  [PASS] Scenario 4 passed.")
 
+-- Cenário 5 — Telemetria desacoplada: GPU ativa e módulo /dev/chroma_amd ausente
+print("[test_ui] Running Scenario 5: Decoupled telemetry with offline module...")
+mockConfig.hide_inactive = false
+mockStatusResponse = {
+    exitCode = 0,
+    stdout = [[{"device":{"available":false,"enabled":0,"saturation":100,"contrast":100,"brightness":0},"telemetry":{"card":"card1","gpu_name":"AMD Radeon RX 9060 XT","gpu_type":"dGPU","pci_id":"0000:2d:00.0","device_id":"1002:7590","is_apu":false,"gpu_busy_percent":35,"sclk_mhz":2100,"vram_used_mib":4096.0,"vram_total_mib":16384.0,"gtt_used_mib":null,"gtt_total_mib":null,"temp_edge_c":48.0,"temp_junction_c":62.0,"power_watts":120.0}}]],
+    stderr = "",
+}
+for _ = 1, 20 do
+    mockEnv.update()
+end
+mockEnv.onConfigChanged()
+
+-- Verificar que telemetria continua ativa
+local st5 = mockState["status"]
+assert(st5 ~= nil, "Scenario 5: status must be published")
+assert(st5.available == true, "Scenario 5: status.available must be true (telemetry active)")
+assert(st5.device_available == false or st5.device.available == false, "Scenario 5: device must be reported unavailable")
+assert(st5.device.enabled == 0, "Scenario 5: device.enabled must be 0")
+assert(mockBar.visible == true, "Scenario 5: bar widget must be visible")
+assert(mockBar.text == "62°C", "Scenario 5: bar widget must show temperature 62°C, got: " .. tostring(mockBar.text))
+
+-- Navegar para Desempenho
+mockEnv.onTabPerformance()
+local treePerf5 = mockPanel.tree
+assert(treePerf5 ~= nil, "Scenario 5: mockPanel.tree must not be nil")
+assert(hasLabelWithText(treePerf5, "card1 (dGPU) — AMD Radeon RX 9060 XT"), "Scenario 5: must display card name and dGPU model")
+assert(not hasLabelWithText(treePerf5, "Temperatura do encapsulamento da APU (Edge)"), "Scenario 5: must not display APU thermal label on dGPU")
+
+-- Navegar para Tela & Cor
+mockEnv.onTabColor()
+local treeColor5 = mockPanel.tree
+assert(treeColor5 ~= nil, "Scenario 5: color tree must not be nil")
+assert(hasLabelWithText(treeColor5, "Módulo /dev/chroma_amd não encontrado no kernel. Calibragem indisponível."), "Scenario 5: must warn that module is absent")
+assert(not hasLabelWithText(treeColor5, "Calibragem: ATIVADA"), "Scenario 5: must NEVER display 'Calibragem: ATIVADA' when module is absent")
+print("  [PASS] Scenario 5 passed.")
+
 print("All Luau UI behavioral tests PASSED successfully!")
