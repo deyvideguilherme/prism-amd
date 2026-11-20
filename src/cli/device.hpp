@@ -44,6 +44,15 @@ void check_device_abi(int fd, const std::string& dev_path = "/dev/chroma_amd");
 // Reads device state from /dev/chroma_amd using POSIX I/O and ioctl
 DeviceState read_device_state(const std::string& dev_path = "/dev/chroma_amd");
 
+// Checks whether the device node exists and can be opened
+bool is_device_available(const std::string& dev_path = "/dev/chroma_amd");
+
+// Reads device state, or returns nullopt if device node is not available/accessible
+std::optional<DeviceState> try_read_device_state(
+    const std::string& dev_path = "/dev/chroma_amd",
+    std::string* error_msg = nullptr
+);
+
 // Writes parameters to /dev/chroma_amd using POSIX I/O and ioctl
 void write_device_params(
     const std::optional<int>& saturation,

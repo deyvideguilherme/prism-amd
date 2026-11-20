@@ -41,35 +41,76 @@ void print_help(const char* prog) {
               << "  " << prog << " status --json\n";
 }
 
-int handle_status(bool json_output) {
-    try {
-        prisma::DeviceState state = prisma::read_device_state();
-        prisma::GpuTelemetry telem = prisma::read_gpu_telemetry();
+static std::string get_active_dev_path() {
+    const char* env = std::getenv("PRISMA_DEVICE_PATH");
+    if (env && *env) {
+        return env;
+    }
+    return "/dev/chroma_amd";
+}
 
-        if (json_output) {
-            std::cout << "{\n"
-                      << "  \"device\": {\n"
-                      << "    \"enabled\": " << state.enabled << ",\n"
-                      << "    \"saturation\": " << state.saturation << ",\n"
-                      << "    \"contrast\": " << state.contrast << ",\n"
-                      << "    \"brightness\": " << state.brightness << "\n"
-                      << "  },\n"
-                      << "  \"telemetry\": " << prisma::format_telemetry_json(telem) << "\n"
-                      << "}\n";
-        } else {
-            std::cout << "=== Prisma Color Configuration (/dev/chroma_amd) ===\n"
-                      << "Enabled:            " << (state.enabled ? "yes" : "no") << "\n"
-                      << "Saturation:         " << state.saturation << " % (Rec.709 CTM)\n"
-                      << "Contrast:           " << state.contrast << " %\n"
-                      << "Brightness:         " << state.brightness << " % (CTM linear gain)\n\n"
-                      << "=== AMD GPU Hardware Telemetry ===\n"
-                      << prisma::format_telemetry_text(telem);
-        }
-        return 0;
+int handle_status(bool json_output) {
+    std::string dev_path = get_active_dev_path();
+    std::string device_err;
+    std::optional<prisma::DeviceState> state_opt;
+    try {
+        state_opt = prisma::read_device_state(dev_path);
     } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << "\n";
+        device_err = e.what();
+    }
+
+    prisma::GpuTelemetry telem;
+    std::string telem_err;
+    try {
+        telem = prisma::read_gpu_telemetry();
+    } catch (const std::exception& e) {
+        telem_err = e.what();
+    }
+
+    bool has_device = state_opt.has_value();
+    bool has_gpu = !telem.card_name.empty();
+
+    if (!has_device && !has_gpu) {
+        std::cerr << "Error: " << (!device_err.empty() ? device_err : (!telem_err.empty() ? telem_err : "No AMD GPU or Prisma device found")) << "\n";
         return 1;
     }
+
+    if (json_output) {
+        std::cout << "{\n";
+        if (has_device) {
+            std::cout << "  \"device\": {\n"
+                      << "    \"available\": true,\n"
+                      << "    \"enabled\": " << state_opt->enabled << ",\n"
+                      << "    \"saturation\": " << state_opt->saturation << ",\n"
+                      << "    \"contrast\": " << state_opt->contrast << ",\n"
+                      << "    \"brightness\": " << state_opt->brightness << "\n"
+                      << "  },\n";
+        } else {
+            std::cout << "  \"device\": {\n"
+                      << "    \"available\": false,\n"
+                      << "    \"enabled\": 0,\n"
+                      << "    \"saturation\": 100,\n"
+                      << "    \"contrast\": 100,\n"
+                      << "    \"brightness\": 0\n"
+                      << "  },\n";
+        }
+        std::cout << "  \"telemetry\": " << prisma::format_telemetry_json(telem) << "\n"
+                  << "}\n";
+    } else {
+        std::cout << "=== Prisma Color Configuration (" << dev_path << ") ===\n";
+        if (has_device) {
+            std::cout << "Status:             Available\n"
+                      << "Enabled:            " << (state_opt->enabled ? "yes" : "no") << "\n"
+                      << "Saturation:         " << state_opt->saturation << " % (Rec.709 CTM)\n"
+                      << "Contrast:           " << state_opt->contrast << " %\n"
+                      << "Brightness:         " << state_opt->brightness << " % (CTM linear gain)\n\n";
+        } else {
+            std::cout << "Status:             Offline (kernel module not loaded)\n\n";
+        }
+        std::cout << "=== AMD GPU Hardware Telemetry ===\n"
+                  << prisma::format_telemetry_text(telem);
+    }
+    return 0;
 }
 
 int handle_telemetry(bool json_output) {

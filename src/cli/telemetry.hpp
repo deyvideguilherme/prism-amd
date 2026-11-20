@@ -11,6 +11,8 @@ struct GpuTelemetry {
     std::string pci_id;                      // e.g. "0000:2d:00.0"
     std::string device_id;                   // e.g. "0x73df"
     bool is_apu = false;
+    std::string gpu_name;                    // e.g. "AMD Radeon RX 9060 XT"
+    std::string gpu_type;                    // "dGPU" or "APU"
     std::optional<int> gpu_busy_percent;     // 0..100 %
     std::optional<double> vram_used_mib;     // MiB
     std::optional<double> vram_total_mib;    // MiB
@@ -38,5 +40,8 @@ std::string format_telemetry_text(const GpuTelemetry& t);
 
 // Formats telemetry as JSON
 std::string format_telemetry_json(const GpuTelemetry& t);
+
+// Serializes a string safely for JSON
+std::string json_string(std::string_view value);
 
 } // namespace prisma
