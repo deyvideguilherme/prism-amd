@@ -173,6 +173,8 @@ cmake --build build --target install-ui
 
 Esse comando registra o diretório `ui/` do Prisma como uma fonte local no Noctalia (`noctalia msg plugins source add prisma path <caminho>/ui`), sincroniza o catálogo com `noctalia msg plugins update prisma` e ativa o plugin com `noctalia msg plugins enable deyvideguilherme/prisma`.
 
+Ao atualizar o código de uma fonte local, execute `cmake --build build --target install-local` para atualizar também o `prisma-ctl` usado pelo painel.
+
 Para remover a integração:
 ```bash
 cmake --build build --target uninstall-ui

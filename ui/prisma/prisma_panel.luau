@@ -449,10 +449,15 @@ end
 
 -- ── Tab 3: Perfis (Profiles Management) ──────────────────────────────────────
 
-local function automationView(automation, profiles)
+local function automationView(automation, profiles, profilesError)
     local enabled = automation.enabled == true
+    local canEdit = automation.error == nil
     local indicator = nil
-    if automation.niri_available == false then
+    if not canEdit then
+        if automation.error ~= profilesError then
+            indicator = automation.error
+        end
+    elseif automation.niri_available == false then
         indicator = tr("panel.automation.niri_unavailable", "Niri indisponível")
     elseif type(automation.active_rule) == "string" then
         indicator = tr("panel.automation.active", "Regra ativa: {pattern}", { pattern = automation.active_rule })
@@ -475,6 +480,7 @@ local function automationView(automation, profiles)
             placeholder = tr("panel.automation.pattern", "app_id (ex.: cs2, steam_app_*)"),
             value = rulePattern,
             flexGrow = 1,
+            enabled = canEdit,
             onChange = "onRulePatternChange",
         }),
     }
@@ -485,6 +491,7 @@ local function automationView(automation, profiles)
             text = tr("panel.automation.use_last_app", "Usar última janela"),
             tooltip = lastApp,
             variant = "outline",
+            enabled = canEdit,
             onClick = function()
                 rulePattern = lastApp
                 rulePatternRevision += 1
@@ -505,11 +512,12 @@ local function automationView(automation, profiles)
                 variant = "destructive",
                 controlSize = "sm",
                 tooltip = tr("panel.automation.delete", "Excluir regra '{pattern}'", { pattern = pattern }),
+                enabled = canEdit,
                 onClick = function() sendCommand({ action = "rule_delete", pattern = pattern }) end,
             }),
         }))
     end
-    if #rows == 0 then
+    if #rows == 0 and canEdit then
         table.insert(rows, ui.label({
             text = tr("panel.automation.empty", "Nenhuma regra configurada"),
             fontSize = 12,
@@ -525,7 +533,7 @@ local function automationView(automation, profiles)
             text = indicator,
             maxWidth = 340,
             fontSize = 11,
-            color = "on_surface_variant",
+            color = if canEdit then "on_surface_variant" else "error",
         }))
     end
 
@@ -537,6 +545,7 @@ local function automationView(automation, profiles)
                 glyph = if enabled then "check" else "x",
                 text = if enabled then tr("panel.automation.enabled", "Ativada") else tr("panel.automation.disabled", "Desativada"),
                 variant = if enabled then "primary" else "outline",
+                enabled = canEdit,
                 onClick = function() sendCommand({ action = "rule_toggle", enabled = not enabled }) end,
             }),
         }),
@@ -547,7 +556,7 @@ local function automationView(automation, profiles)
                 options = options,
                 selectedIndex = selectedIndex,
                 placeholder = tr("panel.automation.profile", "Selecionar perfil salvo"),
-                enabled = #options > 0,
+                enabled = canEdit and #options > 0,
                 flexGrow = 1,
                 onChange = function(index)
                     local selected = tonumber(index)
@@ -560,7 +569,7 @@ local function automationView(automation, profiles)
                 glyph = "plus",
                 text = tr("panel.automation.add", "Adicionar"),
                 variant = "primary",
-                enabled = rulePattern ~= "" and selectedProfile ~= nil,
+                enabled = canEdit and rulePattern ~= "" and selectedProfile ~= nil,
                 onClick = function()
                     if rulePattern ~= "" and selectedProfile then
                         sendCommand({ action = "rule_set", pattern = rulePattern, profile = selectedProfile })
@@ -574,6 +583,7 @@ end
 
 local function profilesView()
     local profiles = if statusData and statusData.profiles then statusData.profiles else {}
+    local profilesError = if statusData then statusData.profiles_error else nil
     local automation = if statusData and statusData.automation then statusData.automation else {}
 
     -- Save Profile Block
@@ -600,7 +610,10 @@ local function profilesView()
 
     -- Profile List Items
     local profileRows = {}
-    if #profiles == 0 then
+    if profilesError then
+        table.insert(profileRows, ui.label({ text = profilesError, color = "error", fontSize = 12, maxWidth = 490 }))
+    end
+    if #profiles == 0 and not profilesError then
         table.insert(profileRows, ui.label({
             text = tr("panel.profiles.empty", "Nenhum perfil salvo ainda"),
             color = "on_surface_variant",
@@ -658,6 +671,7 @@ local function profilesView()
                         key = `profile_default_{name}`,
                         glyph = "star",
                         variant = if isStartupDefault then "primary" else "outline",
+                        enabled = automation.error == nil,
                         tooltip = if isStartupDefault then
                             tr("panel.profiles.clear_startup_default", "Remover '{name}' como padrão de inicialização", { name = name })
                         else
@@ -706,7 +720,7 @@ local function profilesView()
         saveBlock,
         listBlock,
         actionsRow,
-        automationView(automation, profiles),
+        automationView(automation, profiles, profilesError),
     })
 end
 

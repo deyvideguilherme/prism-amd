@@ -55,6 +55,7 @@ local historyPower = {}
 local historySclk = {}
 
 local savedProfiles = {}
+local profilesError = nil
 local automation = { enabled = false, rules = {}, niri_available = true }
 local automationLoaded = false
 local startupHandled = false
@@ -155,10 +156,12 @@ local function publishStatus()
             sclk = historySclk,
         },
         profiles = savedProfiles,
+        profiles_error = profilesError,
         automation = {
             enabled = automation.enabled,
             default_profile = automation.default_profile,
             rules = automation.rules,
+            error = automation.error,
             niri_available = automation.niri_available,
             active_rule = automation.active_rule,
             active_app_id = automation.active_app_id,
@@ -281,17 +284,34 @@ local function isIntegerInRange(value, low, high)
     return type(value) == "number" and value >= low and value <= high and value == math.floor(value)
 end
 
+local function profilesCompatibilityError()
+    return tr("errors.cli_profiles_compatibility", "Atualize o prisma-ctl junto com o plugin e recarregue a lista de perfis.")
+end
+
 local profilesRequest = 0
 local function refreshProfiles()
     profilesRequest += 1
     local request = profilesRequest
-    noctalia.runAsync("prisma-ctl profile list --json", function(result)
-        if request ~= profilesRequest or result.exitCode ~= 0 or type(result.stdout) ~= "string" then return end
+    runCommand("prisma-ctl profile list --json", function(result)
+        if request ~= profilesRequest then return end
+        if result.exitCode ~= 0 or type(result.stdout) ~= "string" then
+            profilesError = tr("errors.profiles_list", "Falha ao carregar perfis salvos")
+            publishStatus()
+            return
+        end
         -- Empty JSON objects and arrays both decode to empty Luau tables.
-        if not result.stdout:match("^%s*%[") then return end
         local ok, profiles = pcall(noctalia.json.decode, result.stdout)
-        if not ok or type(profiles) ~= "table" then return end
+        if not ok or type(profiles) ~= "table" or not result.stdout:match("^%s*%[") then
+            if result.stdout:match("^Saved profiles %(") or result.stdout:match("^No saved profiles found in ") then
+                profilesError = profilesCompatibilityError()
+            else
+                profilesError = tr("errors.profiles_list", "Falha ao carregar perfis salvos")
+            end
+            publishStatus()
+            return
+        end
 
+        profilesError = nil
         local list = {}
         for _, profile in ipairs(profiles) do
             if type(profile) == "table" and type(profile.name) == "string" and profile.name ~= ""
@@ -405,11 +425,23 @@ local automationRequest = 0
 local function refreshAutomation()
     automationRequest += 1
     local request = automationRequest
-    noctalia.runAsync("prisma-ctl rule list --json", function(result)
-        if request ~= automationRequest or result.exitCode ~= 0 or type(result.stdout) ~= "string" then return end
-        local ok, config = pcall(noctalia.json.decode, result.stdout)
-        if not ok or type(config) ~= "table" or type(config.enabled) ~= "boolean" or type(config.rules) ~= "table" then return end
+    runCommand("prisma-ctl rule list --json", function(result)
+        if request ~= automationRequest then return end
+        local ok, config = false, nil
+        if result.exitCode == 0 and type(result.stdout) == "string" then
+            ok, config = pcall(noctalia.json.decode, result.stdout)
+        end
+        if not ok or type(config) ~= "table" or type(config.enabled) ~= "boolean" or type(config.rules) ~= "table" then
+            if type(result.stderr) == "string" and result.stderr:find("Unknown command: 'rule'", 1, true) then
+                automation.error = profilesCompatibilityError()
+            else
+                automation.error = tr("errors.automation_list", "Falha ao carregar regras de automação")
+            end
+            publishStatus()
+            return
+        end
 
+        automation.error = nil
         local rules = {}
         for _, rule in ipairs(config.rules) do
             if type(rule) == "table" and type(rule.pattern) == "string" and rule.pattern ~= ""

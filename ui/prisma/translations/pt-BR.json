@@ -109,6 +109,9 @@
     "apply": "Falha ao aplicar perfil",
     "delete": "Falha ao excluir perfil",
     "reset": "Falha ao resetar parâmetros",
-    "automation": "Falha ao atualizar regras de automação"
+    "automation": "Falha ao atualizar regras de automação",
+    "automation_list": "Falha ao carregar regras de automação",
+    "profiles_list": "Falha ao carregar perfis salvos",
+    "cli_profiles_compatibility": "Atualize o prisma-ctl junto com o plugin e recarregue a lista de perfis."
   }
 }

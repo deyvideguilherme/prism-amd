@@ -109,6 +109,9 @@
     "apply": "Failed to apply profile",
     "delete": "Failed to delete profile",
     "reset": "Failed to reset parameters",
-    "automation": "Failed to update automation rules"
+    "automation": "Failed to update automation rules",
+    "automation_list": "Failed to load automation rules",
+    "profiles_list": "Failed to load saved profiles",
+    "cli_profiles_compatibility": "Update prisma-ctl along with the plugin and reload the profile list."
   }
 }

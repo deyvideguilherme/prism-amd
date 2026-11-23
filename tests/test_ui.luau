@@ -1130,4 +1130,54 @@ do
     session.advance(20)
     assert(hasLabelWithText(session.tree, translate("panel.automation.niri_unavailable")))
 end
+
+print("[test_ui] Running saved profile listing with an older CLI...")
+do
+    language = "pt-BR"
+    local profileList = "prisma-ctl profile list --json"
+    local ruleList = "prisma-ctl rule list --json"
+    local session = newAutomationSession(startupConfiguration, true)
+    local supportedProfiles = session.responses[profileList]
+    local supportedRules = session.responses[ruleList]
+    session.responses[profileList] = cliResponse("[]")
+    session.send({ action = "profile_list" })
+
+    session.responses[profileList] = cliResponse(
+        "Saved profiles (/home/user/.config/prisma/profiles):\n  - Padrão           [sat=200, con=115, bri=10, en=1]\n")
+    session.responses[ruleList] = { exitCode = 1, stdout = "", stderr = "Unknown command: 'rule'\n\n" }
+    loadComponent("panel", session.env)
+    session.env.onOpen()
+    session.env.onTabProfiles()
+
+    local warning = translate("errors.cli_profiles_compatibility")
+    assert(session.state.status.profiles_error == warning, "Plain-text profile output must explain the CLI mismatch")
+    assert(session.state.status.automation.error == warning, "An unknown rule command must explain the CLI mismatch")
+    assert(warning ~= "errors.cli_profiles_compatibility", "The compatibility warning must be translated")
+    assert(hasLabelWithText(session.tree, warning))
+    assert(not hasLabelWithText(session.tree, translate("panel.profiles.empty")), "A failed read cannot establish an empty profile list")
+    session.advance(40)
+    assert(session.state.status.profiles_error == warning and session.state.status.automation.error == warning,
+        "Successful device polling must preserve the profile and automation errors")
+    assert(session.state.status.error == nil, "A CLI compatibility warning must stay in Profiles")
+
+    session.responses[profileList] = cliResponse("No saved profiles found in /home/user/.config/prisma/profiles\n")
+    session.env.onRefreshProfilesClicked()
+    assert(session.state.status.profiles_error == warning, "An older CLI reports an empty list as text as well")
+
+    session.responses[profileList] = supportedProfiles
+    session.env.onRefreshProfilesClicked()
+    assert(session.state.status.profiles_error == nil)
+    assert(hasLabelWithText(session.tree, "competitivo"), "A valid JSON list must make saved profiles visible again")
+    assert(hasLabelWithText(session.tree, warning), "The remaining rule compatibility warning must still be visible")
+    for _, key in ipairs({ "rule_toggle", "profile_default_competitivo" }) do
+        local controls = findNodes(session.tree, function(node) return node.props.key == key end)
+        assert(#controls == 1 and controls[1].props.enabled == false, key .. " must be disabled when rules cannot be read")
+    end
+
+    session.responses[ruleList] = supportedRules
+    session.env.onRefreshProfilesClicked()
+    assert(session.state.status.automation.error == nil)
+    assert(not hasLabelWithText(session.tree, warning))
+    assert(hasLabelWithText(session.tree, translate("panel.profiles.startup_default")))
+end
 print("All Luau UI behavioral tests PASSED successfully!")
