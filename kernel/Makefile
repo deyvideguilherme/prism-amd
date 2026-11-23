@@ -36,7 +36,7 @@ clean:
 	$(MAKE) -C $(KDIR) M=$(M) $(EXTRA_FLAGS) clean
 
 load:
-	sudo modprobe drm_kms_helper
+	-sudo modprobe drm_kms_helper 2>/dev/null || true
 	sudo insmod chroma_amd.ko
 
 unload:
