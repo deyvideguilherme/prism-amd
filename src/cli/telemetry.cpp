@@ -53,6 +53,59 @@ struct AmdCandidate {
     int score = 0;
 };
 
+struct PciDeviceEntry {
+    const char* name;
+    uint16_t device_id;
+    bool is_apu;
+};
+
+constexpr PciDeviceEntry kPciDeviceTable[] = {
+    // APUs
+    // Raven / Picasso
+    {"AMD Radeon Vega Graphics (Raven Ridge)", 0x15dd, true},
+    {"AMD Radeon Vega Graphics (Picasso)", 0x15d8, true},
+    // Renoir / Lucienne
+    {"AMD Radeon Graphics (Renoir)", 0x1636, true},
+    {"AMD Radeon Graphics (Lucienne)", 0x164c, true},
+    // Cezanne / Barcelo
+    {"AMD Radeon Graphics (Cezanne)", 0x1638, true},
+    // Van Gogh
+    {"AMD Radeon Graphics (Van Gogh)", 0x163f, true},
+    // Rembrandt
+    {"AMD Radeon 680M (Rembrandt)", 0x1681, true},
+    // Raphael / Granite Ridge iGPU
+    {"AMD Radeon Graphics (Raphael)", 0x164e, true},
+    {"AMD Radeon Graphics (Granite Ridge)", 0x13c0, true},
+    // Phoenix / Hawk Point
+    {"AMD Radeon 780M (Phoenix)", 0x15bf, true},
+    {"AMD Radeon 760M (Hawk Point)", 0x15c8, true},
+    // Strix Point
+    {"AMD Radeon 890M (Strix Point)", 0x150e, true},
+
+    // dGPUs
+    // RDNA 4
+    {"AMD Radeon RX 9060 XT", 0x7590, false},
+    {"AMD Radeon RX 9060 XT", 0x7591, false},
+    {"AMD Radeon RX 9050", 0x7592, false},
+    {"AMD Radeon RX 9050", 0x7593, false},
+    // RDNA 3
+    {"AMD Radeon RX 7900 XT / XTX", 0x744c, false},
+    {"AMD Radeon RX 7900 GRE", 0x7448, false},
+    {"AMD Radeon RX 7800 XT / 7700 XT", 0x7480, false},
+    {"AMD Radeon RX 7600 XT", 0x7460, false},
+    // RDNA 2
+    {"AMD Radeon RX 6800 / 6800 XT / 6900 XT", 0x73bf, false},
+    {"AMD Radeon RX 6700 XT", 0x73df, false},
+    {"AMD Radeon RX 6600 / 6600 XT", 0x73ff, false},
+    {"AMD Radeon RX 6500 XT", 0x743f, false},
+    // RDNA 1
+    {"AMD Radeon RX 5700 / 5700 XT", 0x731f, false},
+    {"AMD Radeon RX 5500 XT", 0x7340, false},
+    // Polaris / Vega
+    {"AMD Radeon RX 470/480/570/580/590", 0x67df, false},
+    {"AMD Radeon RX Vega 56/64", 0x687f, false},
+};
+
 std::vector<std::filesystem::path> read_directory(const std::filesystem::path& directory) {
     std::vector<std::filesystem::path> result;
     std::error_code ec;
@@ -256,57 +309,16 @@ GpuTelemetry read_gpu_telemetry(const std::filesystem::path& drm_root) {
         telem.gtt_total_mib = static_cast<double>(*g_total) / (1024.0 * 1024.0);
     }
 
-    if (telem.vram_total_mib.has_value() && *telem.vram_total_mib > 0.0 && *telem.vram_total_mib <= 2048.0 &&
-        telem.gtt_total_mib.has_value() && *telem.gtt_total_mib > *telem.vram_total_mib) {
-        telem.is_apu = true;
-    }
-
-    // GPU Name / Model and Type detection
-    std::string hex_id;
-    if (telem.device_id.starts_with("1002:") || telem.device_id.starts_with("0x1002:")) {
-        auto colon = telem.device_id.find(':');
-        hex_id = telem.device_id.substr(colon + 1);
-    } else if (telem.device_id.starts_with("0x")) {
-        hex_id = telem.device_id.substr(2);
-    } else {
-        hex_id = telem.device_id;
-    }
-
-    uint32_t pci_num = 0;
-    try {
-        if (!hex_id.empty()) {
-            pci_num = std::stoul(hex_id, nullptr, 16);
-        }
-    } catch (...) {}
-
-    if (pci_num == 0x7590 || pci_num == 0x7591) {
-        telem.gpu_name = "AMD Radeon RX 9060 XT";
-        telem.gpu_type = "dGPU";
-        telem.is_apu = false;
-    } else if (pci_num == 0x7592 || pci_num == 0x7593) {
-        telem.gpu_name = "AMD Radeon RX 9050";
-        telem.gpu_type = "dGPU";
-        telem.is_apu = false;
-    } else if (pci_num == 0x1638 || pci_num == 0x1636) {
-        telem.gpu_name = "AMD Radeon Graphics (Cezanne)";
-        telem.gpu_type = "APU";
-        telem.is_apu = true;
-    } else {
-        if (telem.is_apu) {
-            telem.gpu_name = "AMD Radeon Graphics (APU)";
-            telem.gpu_type = "APU";
-        } else {
-            telem.gpu_name = "AMD Radeon Graphics";
-            telem.gpu_type = "dGPU";
-        }
-    }
-
     // Clock (SCLK MHz)
     if (auto sclk_str = read_file_string(dev_path / "pp_dpm_sclk")) {
         telem.sclk_mhz = parse_sclk_mhz(*sclk_str);
     }
 
-    // HWMON directory discovery
+    // HWMON directory discovery and sensor flags
+    bool has_mem_temp = false;
+    bool has_fan = false;
+    std::error_code ec;
+
     std::filesystem::path hwmon_dir = dev_path / "hwmon";
     for (const auto& entry : read_directory(hwmon_dir)) {
         if (!entry.filename().string().starts_with("hwmon")) {
@@ -314,6 +326,12 @@ GpuTelemetry read_gpu_telemetry(const std::filesystem::path& drm_root) {
         }
 
         const auto& hw = entry;
+
+        // Check for dedicated fan control / RPM sensors
+        if (std::filesystem::exists(hw / "pwm1", ec) ||
+            std::filesystem::exists(hw / "fan1_input", ec)) {
+            has_fan = true;
+        }
 
         // Read temperatures (temp*_label + temp*_input)
         for (int i = 1; i <= 8; ++i) {
@@ -332,10 +350,12 @@ GpuTelemetry read_gpu_telemetry(const std::filesystem::path& drm_root) {
                 telem.temp_edge_c = temp_c;
             } else if (iequals(label, "junction") || iequals(label, "hotspot")) {
                 telem.temp_junction_c = temp_c;
+            } else if (iequals(label, "mem") || iequals(label, "vram") || iequals(label, "memory")) {
+                has_mem_temp = true;
             }
         }
 
-        // Power (Watts)
+        // Power consumption (Watts)
         std::filesystem::path p_avg = hw / "power1_average";
         std::filesystem::path p_in = hw / "power1_input";
 
@@ -345,7 +365,93 @@ GpuTelemetry read_gpu_telemetry(const std::filesystem::path& drm_root) {
             telem.power_watts = static_cast<double>(*p_in_val) / 1000000.0;
         }
 
+        // Power cap (Watts) - try power1_cap, fallback to power1_cap_default
+        std::filesystem::path p_cap = hw / "power1_cap";
+        std::filesystem::path p_cap_def = hw / "power1_cap_default";
+
+        if (auto cap_val = read_file_number<int64_t>(p_cap)) {
+            if (*cap_val > 0) {
+                telem.power_cap_watts = static_cast<double>(*cap_val) / 1000000.0;
+            }
+        }
+        if (!telem.power_cap_watts.has_value()) {
+            if (auto cap_def_val = read_file_number<int64_t>(p_cap_def)) {
+                if (*cap_def_val > 0) {
+                    telem.power_cap_watts = static_cast<double>(*cap_def_val) / 1000000.0;
+                }
+            }
+        }
+
         break; // Process primary hwmon
+    }
+
+    // GPU Name / Model and Type detection
+    std::string_view hex_view = telem.device_id;
+    if (hex_view.starts_with("1002:") || hex_view.starts_with("0x1002:")) {
+        auto colon = hex_view.find(':');
+        hex_view = hex_view.substr(colon + 1);
+    }
+    if (hex_view.starts_with("0x") || hex_view.starts_with("0X")) {
+        hex_view = hex_view.substr(2);
+    }
+
+    uint16_t pci_num = 0;
+    bool valid_pci = false;
+    if (!hex_view.empty()) {
+        const char* first = hex_view.data();
+        const char* last = hex_view.data() + hex_view.size();
+        auto [ptr, conv_ec] = std::from_chars(first, last, pci_num, 16);
+        if (conv_ec == std::errc() && ptr == last) {
+            valid_pci = true;
+        }
+    }
+
+    bool matched_known_pci = false;
+    if (valid_pci) {
+        for (const auto& entry : kPciDeviceTable) {
+            if (entry.device_id == pci_num) {
+                telem.gpu_name = entry.name;
+                telem.is_apu = entry.is_apu;
+                telem.gpu_type = entry.is_apu ? "APU" : "dGPU";
+                matched_known_pci = true;
+                break;
+            }
+        }
+    }
+
+    if (!matched_known_pci) {
+        // Multi-signal heuristic classification for unknown PCI IDs
+        bool strong_dgpu_signal = has_mem_temp || has_fan ||
+            (telem.power_cap_watts.has_value() && *telem.power_cap_watts > 95.0) ||
+            (telem.vram_total_mib.has_value() && telem.gtt_total_mib.has_value() &&
+             *telem.vram_total_mib > *telem.gtt_total_mib);
+
+        bool is_apu_signal = false;
+        if (!strong_dgpu_signal) {
+            // Signal 1: Shared unified memory (VRAM <= 8192 MiB and GTT > VRAM) without junction/mem/fan
+            if (telem.vram_total_mib.has_value() && *telem.vram_total_mib > 0.0 &&
+                *telem.vram_total_mib <= 8192.0 &&
+                telem.gtt_total_mib.has_value() && *telem.gtt_total_mib > *telem.vram_total_mib &&
+                !telem.temp_junction_c.has_value() && !has_mem_temp && !has_fan) {
+                is_apu_signal = true;
+            }
+            // Signal 2: Power cap <= 65W with GTT >= VRAM
+            else if (telem.power_cap_watts.has_value() && *telem.power_cap_watts <= 65.0 &&
+                     telem.gtt_total_mib.has_value() && telem.vram_total_mib.has_value() &&
+                     *telem.gtt_total_mib >= *telem.vram_total_mib) {
+                is_apu_signal = true;
+            }
+        }
+
+        if (is_apu_signal) {
+            telem.is_apu = true;
+            telem.gpu_type = "APU";
+            telem.gpu_name = "AMD Radeon Graphics (APU)";
+        } else {
+            telem.is_apu = false;
+            telem.gpu_type = "dGPU";
+            telem.gpu_name = "AMD Radeon Graphics";
+        }
     }
 
     return telem;
@@ -408,8 +514,17 @@ std::string format_telemetry_text(const GpuTelemetry& t) {
     else ss << "N/A\n";
 
     ss << "Power Consumption:  ";
-    if (t.power_watts) ss << *t.power_watts << " W\n";
-    else ss << "N/A\n";
+    if (t.power_watts) {
+        ss << *t.power_watts << " W";
+        if (t.power_cap_watts) {
+            ss << " (Cap: " << *t.power_cap_watts << " W)";
+        }
+        ss << "\n";
+    } else if (t.power_cap_watts) {
+        ss << "N/A (Cap: " << *t.power_cap_watts << " W)\n";
+    } else {
+        ss << "N/A\n";
+    }
 
     return ss.str();
 }
@@ -469,6 +584,11 @@ std::string format_telemetry_json(const GpuTelemetry& t) {
 
     ss << "  \"power_watts\": ";
     if (t.power_watts) ss << *t.power_watts;
+    else ss << "null";
+    ss << ",\n";
+
+    ss << "  \"power_cap_watts\": ";
+    if (t.power_cap_watts) ss << *t.power_cap_watts;
     else ss << "null";
     ss << "\n";
 

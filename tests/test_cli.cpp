@@ -390,11 +390,201 @@ void test_profiles_manager() {
     std::cout << "  [PASS] Test 3: Profile Serialization & Management passed.\n";
 }
 
+void test_power_cap_and_apu_heuristics() {
+    std::cout << "[test_cli] Running Test 4: Power Cap & APU/dGPU Heuristics...\n";
+
+    // Sub-test (a): power1_cap reading and fallback to power1_cap_default
+    {
+        TemporaryDirectory fixture;
+        const auto& root = fixture.path;
+        auto dev = root / "card1" / "device";
+        auto hw = dev / "hwmon" / "hwmon0";
+        std::filesystem::create_directories(hw);
+        std::ofstream(dev / "vendor") << "0x1002\n";
+        std::ofstream(hw / "power1_cap") << "180000000\n"; // 180.0 W
+
+        GpuTelemetry t = read_gpu_telemetry(root);
+        assert(t.power_cap_watts.has_value() && std::abs(*t.power_cap_watts - 180.0) < 0.1);
+        std::string json = format_telemetry_json(t);
+        assert(json.find("\"power_cap_watts\": 180.0") != std::string::npos);
+        std::string text = format_telemetry_text(t);
+        assert(text.find("(Cap: 180.0 W)") != std::string::npos);
+    }
+    // Sub-test (a2): fallback to power1_cap_default when power1_cap is missing
+    {
+        TemporaryDirectory fixture;
+        const auto& root = fixture.path;
+        auto dev = root / "card1" / "device";
+        auto hw = dev / "hwmon" / "hwmon0";
+        std::filesystem::create_directories(hw);
+        std::ofstream(dev / "vendor") << "0x1002\n";
+        std::ofstream(hw / "power1_cap_default") << "65000000\n"; // 65.0 W
+
+        GpuTelemetry t = read_gpu_telemetry(root);
+        assert(t.power_cap_watts.has_value() && std::abs(*t.power_cap_watts - 65.0) < 0.1);
+        std::string json = format_telemetry_json(t);
+        assert(json.find("\"power_cap_watts\": 65.0") != std::string::npos);
+    }
+    // Sub-test (a3): fallback to power1_cap_default when power1_cap is <= 0
+    {
+        TemporaryDirectory fixture;
+        const auto& root = fixture.path;
+        auto dev = root / "card1" / "device";
+        auto hw = dev / "hwmon" / "hwmon0";
+        std::filesystem::create_directories(hw);
+        std::ofstream(dev / "vendor") << "0x1002\n";
+        std::ofstream(hw / "power1_cap") << "0\n";
+        std::ofstream(hw / "power1_cap_default") << "95000000\n"; // 95.0 W
+
+        GpuTelemetry t = read_gpu_telemetry(root);
+        assert(t.power_cap_watts.has_value() && std::abs(*t.power_cap_watts - 95.0) < 0.1);
+    }
+    // Sub-test (a4): null when neither power1_cap nor power1_cap_default is present
+    {
+        TemporaryDirectory fixture;
+        const auto& root = fixture.path;
+        auto dev = root / "card1" / "device";
+        auto hw = dev / "hwmon" / "hwmon0";
+        std::filesystem::create_directories(hw);
+        std::ofstream(dev / "vendor") << "0x1002\n";
+
+        GpuTelemetry t = read_gpu_telemetry(root);
+        assert(!t.power_cap_watts.has_value());
+        std::string json = format_telemetry_json(t);
+        assert(json.find("\"power_cap_watts\": null") != std::string::npos);
+    }
+
+    // Sub-test (b): APU with 4 GiB VRAM in BIOS (and GTT of 12 GiB, no fan/mem/hotspot) -> is_apu: true
+    {
+        TemporaryDirectory fixture;
+        const auto& root = fixture.path;
+        auto dev = root / "card1" / "device";
+        auto hw = dev / "hwmon" / "hwmon0";
+        std::filesystem::create_directories(hw);
+        std::ofstream(dev / "vendor") << "0x1002\n";
+        std::ofstream(dev / "mem_info_vram_total") << "4294967296\n";  // 4096 MiB (4 GiB)
+        std::ofstream(dev / "mem_info_gtt_total") << "12884901888\n"; // 12288 MiB (12 GiB)
+        std::ofstream(hw / "temp1_label") << "edge\n";
+        std::ofstream(hw / "temp1_input") << "40000\n";
+
+        GpuTelemetry t = read_gpu_telemetry(root);
+        assert(t.is_apu);
+        assert(t.gpu_type == "APU");
+        assert(t.gpu_name == "AMD Radeon Graphics (APU)");
+        std::string json = format_telemetry_json(t);
+        assert(json.find("\"is_apu\": true") != std::string::npos);
+    }
+
+    // Sub-test (c1): Unknown dGPU with 2 GiB VRAM but fan1_input present -> is_apu: false
+    {
+        TemporaryDirectory fixture;
+        const auto& root = fixture.path;
+        auto dev = root / "card1" / "device";
+        auto hw = dev / "hwmon" / "hwmon0";
+        std::filesystem::create_directories(hw);
+        std::ofstream(dev / "vendor") << "0x1002\n";
+        std::ofstream(dev / "mem_info_vram_total") << "2147483648\n";  // 2048 MiB
+        std::ofstream(dev / "mem_info_gtt_total") << "8589934592\n";  // 8192 MiB
+        std::ofstream(hw / "temp1_label") << "edge\n";
+        std::ofstream(hw / "temp1_input") << "45000\n";
+        std::ofstream(hw / "fan1_input") << "1200\n"; // Dedicated fan
+
+        GpuTelemetry t = read_gpu_telemetry(root);
+        assert(!t.is_apu);
+        assert(t.gpu_type == "dGPU");
+        std::string json = format_telemetry_json(t);
+        assert(json.find("\"is_apu\": false") != std::string::npos);
+    }
+
+    // Sub-test (c2): Unknown dGPU with 2 GiB VRAM but pwm1 present -> is_apu: false
+    {
+        TemporaryDirectory fixture;
+        const auto& root = fixture.path;
+        auto dev = root / "card1" / "device";
+        auto hw = dev / "hwmon" / "hwmon0";
+        std::filesystem::create_directories(hw);
+        std::ofstream(dev / "vendor") << "0x1002\n";
+        std::ofstream(dev / "mem_info_vram_total") << "2147483648\n";  // 2048 MiB
+        std::ofstream(dev / "mem_info_gtt_total") << "8589934592\n";  // 8192 MiB
+        std::ofstream(hw / "pwm1") << "128\n";
+
+        GpuTelemetry t = read_gpu_telemetry(root);
+        assert(!t.is_apu);
+        assert(t.gpu_type == "dGPU");
+    }
+
+    // Sub-test (c3): Unknown dGPU with 2 GiB VRAM but power_cap_watts > 95W -> is_apu: false
+    {
+        TemporaryDirectory fixture;
+        const auto& root = fixture.path;
+        auto dev = root / "card1" / "device";
+        auto hw = dev / "hwmon" / "hwmon0";
+        std::filesystem::create_directories(hw);
+        std::ofstream(dev / "vendor") << "0x1002\n";
+        std::ofstream(dev / "mem_info_vram_total") << "2147483648\n";  // 2048 MiB
+        std::ofstream(dev / "mem_info_gtt_total") << "8589934592\n";  // 8192 MiB
+        std::ofstream(hw / "power1_cap") << "130000000\n"; // 130 W
+
+        GpuTelemetry t = read_gpu_telemetry(root);
+        assert(!t.is_apu);
+        assert(t.gpu_type == "dGPU");
+    }
+
+    // Sub-test (d): Correct identification via known PCI table (1002:73bf, 1002:744c, 1002:1681)
+    {
+        // 1002:73bf -> RX 6800 / 6800 XT / 6900 XT (dGPU)
+        {
+            TemporaryDirectory fixture;
+            const auto& root = fixture.path;
+            auto dev = root / "card1" / "device";
+            std::filesystem::create_directories(dev);
+            std::ofstream(dev / "vendor") << "0x1002\n";
+            std::ofstream(dev / "device") << "0x73bf\n";
+
+            GpuTelemetry t = read_gpu_telemetry(root);
+            assert(!t.is_apu);
+            assert(t.gpu_type == "dGPU");
+            assert(t.gpu_name == "AMD Radeon RX 6800 / 6800 XT / 6900 XT");
+        }
+        // 1002:744c -> RX 7900 XT / XTX (dGPU)
+        {
+            TemporaryDirectory fixture;
+            const auto& root = fixture.path;
+            auto dev = root / "card1" / "device";
+            std::filesystem::create_directories(dev);
+            std::ofstream(dev / "vendor") << "0x1002\n";
+            std::ofstream(dev / "device") << "0x744c\n";
+
+            GpuTelemetry t = read_gpu_telemetry(root);
+            assert(!t.is_apu);
+            assert(t.gpu_type == "dGPU");
+            assert(t.gpu_name == "AMD Radeon RX 7900 XT / XTX");
+        }
+        // 1002:1681 -> AMD Radeon 680M (Rembrandt) (APU)
+        {
+            TemporaryDirectory fixture;
+            const auto& root = fixture.path;
+            auto dev = root / "card1" / "device";
+            std::filesystem::create_directories(dev);
+            std::ofstream(dev / "vendor") << "0x1002\n";
+            std::ofstream(dev / "device") << "0x1681\n";
+
+            GpuTelemetry t = read_gpu_telemetry(root);
+            assert(t.is_apu);
+            assert(t.gpu_type == "APU");
+            assert(t.gpu_name == "AMD Radeon 680M (Rembrandt)");
+        }
+    }
+
+    std::cout << "  [PASS] Test 4: Power Cap & APU/dGPU Heuristics passed.\n";
+}
+
 int main() {
     std::cout << "=== Prisma CLI & Telemetry Test Suite ===\n";
     test_device_parser();
     test_telemetry_parser();
     test_profiles_manager();
+    test_power_cap_and_apu_heuristics();
     std::cout << "All CLI unit tests PASSED successfully!\n";
     return 0;
 }

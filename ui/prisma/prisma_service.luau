@@ -39,6 +39,7 @@ local telemetryState = {
     temp_edge_c = 0,
     temp_junction_c = 0,
     power_watts = 0,
+    power_cap_watts = 0,
 }
 
 -- Ring-buffers (up to 60 historical samples)
@@ -108,6 +109,7 @@ local function publishStatus()
             temp_edge_c = telemetryState.temp_edge_c,
             temp_junction_c = telemetryState.temp_junction_c,
             power_watts = telemetryState.power_watts,
+            power_cap_watts = telemetryState.power_cap_watts,
         },
         history = {
             gpu_busy = historyGpu,
@@ -182,6 +184,7 @@ local function pollStatus(onComplete)
                     telemetryState.temp_edge_c = if type(telem.temp_edge_c) == "number" then telem.temp_edge_c else 0
                     telemetryState.temp_junction_c = if type(telem.temp_junction_c) == "number" then telem.temp_junction_c else 0
                     telemetryState.power_watts = if type(telem.power_watts) == "number" then telem.power_watts else 0
+                    telemetryState.power_cap_watts = if type(telem.power_cap_watts) == "number" then telem.power_cap_watts else 0
                 end
 
                 local effectiveTemp = if telemetryState.temp_junction_c > 0 then telemetryState.temp_junction_c else telemetryState.temp_edge_c
