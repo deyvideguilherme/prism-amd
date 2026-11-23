@@ -66,7 +66,23 @@
       "saved": "PERFIS SALVOS",
       "reload": "Recarregar Lista",
       "restore": "Restaurar Padrões",
-      "delete": "Excluir perfil '{name}'"
+      "delete": "Excluir perfil '{name}'",
+      "startup_default": "Padrão de Inicialização",
+      "set_startup_default": "Definir '{name}' como padrão de inicialização",
+      "clear_startup_default": "Remover '{name}' como padrão de inicialização"
+    },
+    "automation": {
+      "title": "Troca Automática (Niri)",
+      "enabled": "Ativada",
+      "disabled": "Desativada",
+      "niri_unavailable": "Niri indisponível",
+      "active": "Regra ativa: {pattern}",
+      "pattern": "app_id (ex.: cs2, steam_app_*)",
+      "use_last_app": "Usar última janela",
+      "profile": "Selecionar perfil salvo",
+      "add": "Adicionar",
+      "empty": "Nenhuma regra configurada",
+      "delete": "Excluir regra '{pattern}'"
     },
     "close": "Fechar",
     "tabs": {
@@ -92,6 +108,7 @@
     "save": "Falha ao salvar perfil",
     "apply": "Falha ao aplicar perfil",
     "delete": "Falha ao excluir perfil",
-    "reset": "Falha ao resetar parâmetros"
+    "reset": "Falha ao resetar parâmetros",
+    "automation": "Falha ao atualizar regras de automação"
   }
 }

@@ -2,7 +2,7 @@
 
 O **Prisma Control Center** (`chroma-layer` / `prism-amd`) é uma suíte integrada de controle de cor e exibição em hardware projetada para GPUs AMD Radeon (`amdgpu`) no Linux, com foco no ambiente **Noctalia Shell (Niri / Wayland)**.
 
-Este documento detalha as três camadas do sistema, o inventário completo de arquivos do repositório, o contrato oficial de integração JSON e o roteiro de evolução técnica.
+Este documento descreve as três camadas do sistema, os arquivos do repositório e os contratos JSON de integração.
 
 ---
 
@@ -11,7 +11,9 @@ Este documento detalha as três camadas do sistema, o inventário completo de ar
 ```mermaid
 flowchart TD
     Noctalia["Noctalia (painel, serviço e widget)"] -->|"CLI + JSON"| CLI["prisma-ctl"]
+    Noctalia -->|"Janela focada via IPC"| Niri["Niri"]
     CLI --> Profiles["Perfis .conf"]
+    CLI --> Automation["automation.conf"]
     CLI --> Sensors["Sensores DRM sysfs e hwmon"]
     CLI -->|"ABI v1"| Config["/dev/chroma_amd (preferências)"]
     Compositor -->|"Commit DRM do compositor"| Observer["Kprobe de descoberta AMDGPU"]
@@ -39,21 +41,21 @@ Ao desativar ou usar parâmetros neutros, o workqueue restaura bypass somente no
 A interface de controle de usuário é construída em C++20 com quatro responsabilidades.
 - **`device.cpp` / `device.hpp`:** Gerencia a comunicação de baixo nível com `/dev/chroma_amd` via chamadas de sistema POSIX (`open`, `read`, `write`, `close`). Expõe `is_device_available()` e `try_read_device_state()`, permitindo checar a presença do módulo sem falhas abruptas. Valida intervalos de parâmetros no cliente antes do envio e traduz códigos de erro do sistema (`ENOENT` para módulo descarregado, `EACCES` para permissão do grupo `video`, `EINVAL` para parâmetro rejeitado).
 - **`telemetry.cpp` / `telemetry.hpp`:** Realiza a descoberta dinâmica de adaptadores gráficos AMD varrendo `/sys/class/drm/card*/device/vendor` em busca de `0x1002` (sem hardcodar índices como `card0` ou `card1`). Desacoplada totalmente do nó `/dev/chroma_amd`, operando mesmo se o módulo de kernel não estiver carregado. Detecta dinamicamente modelos de GPU (incluindo Radeon RX 9060 XT via PCI ID `0x7590`), categoriza dGPU vs. APU, lê dados de carga (`gpu_busy_percent`), memória VRAM e GTT, frequência ativa de SCLK, temperaturas de encapsulamento/hotspot e potência em Watts.
-- **`profiles.cpp` / `profiles.hpp`:** Usa arquivos regulares `<nome>.conf` no diretório de perfis configurado. Valida o nome e os parâmetros, navega por descritores de diretório sem seguir links e publica gravações com rename e fsync. A CLI oferece salvamento, aplicação, listagem, exclusão e restauração de padrões.
-- **`main.cpp`:** CLI `prisma-ctl` oferecendo os subcomandos `status`, `set`, `telemetry` e `profile`. Suporta saída em texto legível para humanos e formato JSON estruturado (`--json`) com o campo `device.available` que desacopla a presença da GPU do módulo de calibração.
+- **`profiles.cpp` / `profiles.hpp`:** Persiste perfis e regras de automação em arquivos regulares. Valida nomes e valores, navega por descritores de diretório sem seguir links e grava usando arquivo temporário, `fsync` e `rename`.
+- **`main.cpp`:** CLI `prisma-ctl` com os subcomandos `status`, `set`, `telemetry`, `profile`, `rule` e `doctor`. O campo `device.available` em `status --json` indica a disponibilidade do módulo de calibração independentemente da telemetria da GPU.
 
 ### 1.3. Camada 3: Plugin Noctalia Shell (`ui/prisma/`)
 
 Interface gráfica oficial integrada ao Noctalia Shell no compositor Niri:
 - **`plugin.toml`:** Manifesto do plugin com metadados, configurações do usuário (métrica da barra e ocultação quando inativo), declaração do serviço em background, do widget de barra e do painel flutuante.
-- **`prisma_service.luau`:** Serviço persistente que monitora o estado do hardware e despacha comandos assíncronos (`prisma-ctl status --json`, `prisma-ctl set`, `prisma-ctl profile`). Implementa pooling adaptativo (1000ms com painel aberto, 2000ms em repouso) e debounce de 40ms para comandos interativos. Publica atualizações de forma otimista (`currentDev = if isDirty or isMutating then pendingState else deviceState`) e protege o estado contra snapshots de hardware obsoletos em trânsito.
+- **`prisma_service.luau`:** Serviço persistente que monitora o estado do hardware, restaura o perfil padrão e consulta o foco do Niri. Consulta o estado do hardware a cada segundo com o painel aberto e a cada cinco segundos em repouso. Aplica um debounce de 50 ms a comandos interativos e publica as alterações de forma otimista enquanto aguarda a confirmação.
 - **`prisma_widget.luau`:** Widget exibido na barra do Noctalia Shell com o ícone de paleta, métrica selecionada (Hotspot, Borda ou Carga) e tooltip com resumo de sensores. Em APUs sem sensor Hotspot (`temp_junction_c`), adota fallback automático para a temperatura de encapsulamento (`temp_edge_c`).
 - **`prisma_panel.luau`:** Central de controle interativa estruturada em 3 abas com imunidade a *snap-back* de sliders:
   - **Desempenho:** Indicadores proporcionais com escala dinâmica inteligente:
     - *APUs (ex.: Ryzen 5 5600GT):* Teto de potência ajustado para 65W (PPT), exibição unificada de memória `VRAM + GTT` (ex.: 512 MiB VRAM + GTT do sistema) e fallback limpo para sensor único de borda.
     - *dGPUs (ex.: RX 9060 XT):* Teto de potência de 300W, alocação de memória VRAM dedicada física e exibição simultânea de Hotspot e Borda.
   - **Tela & Cor:** Chave mestre de calibragem, trackbars interativas de 25 segmentos clicáveis para Saturação, Contraste e Brilho, campo de entrada numérica direta (`width = 64`), botões de ajuste fino (`-1`/`+1`), restauração individual e presets rápidos (Padrão, Competitivo, Cinema e Monocromático). Mantém `hasPendingColorUpdate` para reter o valor clicado localmente até confirmação do driver.
-  - **Perfis:** Formulário de salvamento do estado atual, listagem de perfis salvos com ações de aplicar/remover e restauração aos padrões de fábrica.
+  - **Perfis:** Salvamento, aplicação e exclusão de perfis, escolha do padrão de inicialização, gerenciamento de regras do Niri e restauração aos padrões de fábrica.
 
 > [!NOTE]
 > **Arquitetura de execução do plugin Noctalia Shell (API 36):** O runtime do Noctalia carrega cada componente (`service`, `widget`, `panel`) em instâncias isoladas a partir de seus arquivos de entrada declarados em `plugin.toml`, sem suporte a `require()` relativo entre módulos locais dentro do diretório do plugin. Por essa razão, `prisma_panel.luau` é mantido como uma unidade coesa, estruturada em funções e helpers modulares internos, prevenindo falhas de resolução dinâmica em produção.
@@ -74,8 +76,8 @@ Interface gráfica oficial integrada ao Noctalia Shell no compositor Niri:
 | `kernel/dkms.conf` | Metadados do DKMS para compilação automática do módulo a cada atualização do kernel Linux. |
 | `src/cli/device.hpp` / `device.cpp` | Controlador POSIX I/O para `/dev/chroma_amd`, validação de limites de parâmetros e tratamento detalhado de erros do sistema. |
 | `src/cli/telemetry.hpp` / `telemetry.cpp` | Descoberta dinâmica de GPU AMD (`vendor == 0x1002`), leitura de métricas sysfs e hwmon e formatadores texto/JSON. |
-| `src/cli/profiles.hpp` / `profiles.cpp` | Serialização, carregamento, listagem e exclusão de perfis INI em `~/.config/prisma/profiles/`. |
-| `src/cli/main.cpp` | Ponto de entrada do executável `prisma-ctl`, despachando `status`, `set`, `telemetry`, `profile`, `doctor` e as opções de versão e ajuda. |
+| `src/cli/profiles.hpp` / `profiles.cpp` | Persistência de perfis e configuração da automação no diretório do Prisma. |
+| `src/cli/main.cpp` | Ponto de entrada do executável `prisma-ctl`, despachando `status`, `set`, `telemetry`, `profile`, `rule`, `doctor` e as opções de versão e ajuda. |
 | `legacy/` | Componentes históricos opcionais: hook DRM via `LD_PRELOAD` (`drm_hook.cpp`, `drm_ctm.cpp`), camada Vulkan (`layer.cpp`, `shader.comp`), manifesto e exemplo de configuração. |
 | `tests/test_ctm.cpp` | Testes unitários de validação matemática do ponto fixo S31.32 e saturação Rec.709. |
 | `tests/test_color_math.cpp` | Testes unitários de validação matemática do ponto fixo S31.32, CTM, GAMMA_LUT, pivô de contraste, brilho e tolerância/rejeição de Night Light. |
@@ -168,6 +170,31 @@ A CLI identifica o tipo de dispositivo combinando uma tabela estática de PCI ID
 [{"name": "jogos", "saturation": 160, "contrast": 115, "brightness": 10, "enabled": 1}]
 ```
 
+### 3.3. Regras de automação
+
+`prisma-ctl rule list --json` escreve em stdout um objeto com `enabled` (booleano), `default_profile` (nome do perfil em UTF-8 ou `null`) e `rules` (array de objetos com `pattern` e `profile`, ambos strings). As regras são ordenadas por `pattern` em ordem lexicográfica de bytes. A configuração inicial retorna `false`, `null` e `[]`, respectivamente.
+
+```json
+{
+  "enabled": true,
+  "default_profile": "desktop",
+  "rules": [
+    {"pattern": "cs2", "profile": "competitivo"},
+    {"pattern": "steam_app_*", "profile": "jogos"}
+  ]
+}
+```
+
+A configuração fica em `$XDG_CONFIG_HOME/prisma/automation.conf` ou em `~/.config/prisma/automation.conf`. `rule set` e `rule default` exigem um perfil salvo. A exclusão de um perfil também remove suas referências da automação.
+
+Os padrões aceitam de 1 a 128 bytes ASCII imprimíveis, sem espaços. A CLI normaliza as letras ASCII para minúsculas. `*` aceita zero ou mais caracteres, e o restante do padrão é literal. Um padrão exato ganha de um glob. Entre globs, ganha o padrão com mais bytes literais e, em caso de empate, o primeiro em ordem lexicográfica. `rule match <app_id>` consulta as regras independentemente de `enabled` e imprime o perfil correspondente. Na ausência de correspondência, a saída fica vazia e o código de saída é `1`.
+
+O serviço Noctalia aplica o perfil padrão uma vez ao confirmar o acesso ao dispositivo na inicialização, independentemente de `enabled`. A cada segundo, consulta a janela focada quando a automação está ativa e há regras ou quando a aba Perfis está aberta. Com o painel aberto ou uma alteração em trânsito, a troca por foco fica suspensa. Ao focar uma janela sem correspondência após uma regra, o serviço restaura o perfil padrão ou os valores que precediam a regra. Uma seleção manual feita durante uma regra prevalece até o foco mudar de janela. Desativar a troca automática preserva a calibração que estiver aplicada naquele momento.
+
+O objeto `automation` no estado compartilhado do plugin inclui `enabled`, `default_profile` e `rules`, além de `niri_available`, `active_rule` (o padrão aplicado), `active_app_id` (o identificador da janela sob a regra) e `last_app_id` (o último identificador capturado). Uma falha no IPC do Niri interrompe as consultas em segundo plano. A próxima abertura da aba Perfis pode tentar novamente.
+
+O serviço relê a configuração a cada dez segundos para reconhecer alterações feitas diretamente pela CLI. A aba Perfis atualiza a configuração ao abrir e após alterações feitas pelo painel.
+
 ---
 
 ## 4. Compilação e testes
@@ -181,7 +208,4 @@ Integrada ao CTest através de `tests/check_ui.py`, a suíte executa os scripts 
 - **Cenário 2 (dGPU RX 9060 XT):** Valida leitura de Hotspot, teto de 300W e exibição de VRAM física dedicada.
 - **Cenário 3 (Hardware Offline):** Valida ocultação do widget quando `hide_inactive = true` e desativação segura dos indicadores.
 - **Cenário 4 (Ajuste Otimista de Cor e Imunidade a Snapshots Obsoletos):** Valida atualização imediata do slider para 150%, retenção de comando em trânsito assíncrono, imunidade contra *snap-back* diante de polls com snapshots obsoletos e reconciliação limpa pós-hardware.
-
-## 5. Evolução
-
-Uma frente futura é o daemon de perfis por jogo, com detecção da janela ativa e aplicação ou restauração de perfis ao iniciar ou encerrar aplicativos.
+- **Automação de perfis:** Valida a aplicação do padrão na inicialização, as transições de foco do Niri, a pausa enquanto o painel está aberto, a indisponibilidade silenciosa do compositor e os controles da aba Perfis.

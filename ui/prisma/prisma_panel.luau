@@ -5,6 +5,9 @@
 
 local currentTab = "performance" -- "performance" | "color" | "profiles"
 local newProfileName = ""
+local rulePattern = ""
+local rulePatternRevision = 0
+local ruleProfile = nil
 local hasPendingColorUpdate = false
 local lastMutationErrorSeq = 0
 
@@ -446,8 +449,132 @@ end
 
 -- ── Tab 3: Perfis (Profiles Management) ──────────────────────────────────────
 
+local function automationView(automation, profiles)
+    local enabled = automation.enabled == true
+    local indicator = nil
+    if automation.niri_available == false then
+        indicator = tr("panel.automation.niri_unavailable", "Niri indisponível")
+    elseif type(automation.active_rule) == "string" then
+        indicator = tr("panel.automation.active", "Regra ativa: {pattern}", { pattern = automation.active_rule })
+    end
+
+    local options = {}
+    local selectedIndex = 0
+    for index, profile in ipairs(profiles) do
+        options[index] = profile.name
+        if profile.name == ruleProfile then
+            selectedIndex = index - 1
+        end
+    end
+    local selectedProfile = options[selectedIndex + 1]
+
+    local lastApp = automation.last_app_id
+    local patternControls = {
+        ui.input({
+            key = `rule_pattern_{rulePatternRevision}`,
+            placeholder = tr("panel.automation.pattern", "app_id (ex.: cs2, steam_app_*)"),
+            value = rulePattern,
+            flexGrow = 1,
+            onChange = "onRulePatternChange",
+        }),
+    }
+    if type(lastApp) == "string" and lastApp ~= "" then
+        table.insert(patternControls, ui.button({
+            key = "rule_use_last_app",
+            glyph = "focus-2",
+            text = tr("panel.automation.use_last_app", "Usar última janela"),
+            tooltip = lastApp,
+            variant = "outline",
+            onClick = function()
+                rulePattern = lastApp
+                rulePatternRevision += 1
+                render()
+            end,
+        }))
+    end
+
+    local rules = automation.rules or {}
+    local rows = {}
+    for _, rule in ipairs(rules) do
+        local pattern = rule.pattern
+        table.insert(rows, ui.row({ key = `rule_{pattern}`, gap = 8, align = "center" }, {
+            ui.label({ text = `{pattern} → {rule.profile}`, flexGrow = 1, maxWidth = 440, fontSize = 12 }),
+            ui.button({
+                key = `rule_delete_{pattern}`,
+                glyph = "trash",
+                variant = "destructive",
+                controlSize = "sm",
+                tooltip = tr("panel.automation.delete", "Excluir regra '{pattern}'", { pattern = pattern }),
+                onClick = function() sendCommand({ action = "rule_delete", pattern = pattern }) end,
+            }),
+        }))
+    end
+    if #rows == 0 then
+        table.insert(rows, ui.label({
+            text = tr("panel.automation.empty", "Nenhuma regra configurada"),
+            fontSize = 12,
+            color = "on_surface_variant",
+        }))
+    end
+
+    local heading = {
+        ui.label({ text = tr("panel.automation.title", "Troca Automática (Niri)"), fontSize = 14, fontWeight = "bold" }),
+    }
+    if indicator then
+        table.insert(heading, ui.label({
+            text = indicator,
+            maxWidth = 340,
+            fontSize = 11,
+            color = "on_surface_variant",
+        }))
+    end
+
+    return ui.column({ gap = 8, align = "stretch" }, {
+        ui.row({ gap = 8, align = "center", justify = "space_between" }, {
+            ui.column({ gap = 2, flexGrow = 1 }, heading),
+            ui.button({
+                key = "rule_toggle",
+                glyph = if enabled then "check" else "x",
+                text = if enabled then tr("panel.automation.enabled", "Ativada") else tr("panel.automation.disabled", "Desativada"),
+                variant = if enabled then "primary" else "outline",
+                onClick = function() sendCommand({ action = "rule_toggle", enabled = not enabled }) end,
+            }),
+        }),
+        ui.row({ gap = 8, align = "center" }, patternControls),
+        ui.row({ gap = 8, align = "center" }, {
+            ui.select({
+                key = "rule_profile",
+                options = options,
+                selectedIndex = selectedIndex,
+                placeholder = tr("panel.automation.profile", "Selecionar perfil salvo"),
+                enabled = #options > 0,
+                flexGrow = 1,
+                onChange = function(index)
+                    local selected = tonumber(index)
+                    ruleProfile = if selected then options[selected + 1] else nil
+                    render()
+                end,
+            }),
+            ui.button({
+                key = "rule_add",
+                glyph = "plus",
+                text = tr("panel.automation.add", "Adicionar"),
+                variant = "primary",
+                enabled = rulePattern ~= "" and selectedProfile ~= nil,
+                onClick = function()
+                    if rulePattern ~= "" and selectedProfile then
+                        sendCommand({ action = "rule_set", pattern = rulePattern, profile = selectedProfile })
+                    end
+                end,
+            }),
+        }),
+        ui.column({ gap = 6, align = "stretch" }, rows),
+    })
+end
+
 local function profilesView()
     local profiles = if statusData and statusData.profiles then statusData.profiles else {}
+    local automation = if statusData and statusData.automation then statusData.automation else {}
 
     -- Save Profile Block
     local saveBlock = ui.column({ gap = 8, align = "stretch" }, {
@@ -487,6 +614,7 @@ local function profilesView()
             local bri = p.brightness or 0
             local isActive = deviceAvailable() and matchesColors(p)
                 and (p.enabled == nil or localDevice.enabled == p.enabled)
+            local isStartupDefault = name == automation.default_profile
 
             local onApply = function()
                 hasPendingColorUpdate = false
@@ -497,17 +625,27 @@ local function profilesView()
                 sendCommand({ action = "profile_delete", name = name })
             end
 
-            table.insert(profileRows, ui.row({ align = "center", justify = "space_between" }, {
-                ui.column({ gap = 2, flexGrow = 1 }, {
-                    ui.label({ text = name, fontSize = 14, fontWeight = "bold" }),
-                    ui.label({
-                        text = tr("color.summary", "Saturação: {sat}% | Contraste: {con}% | Brilho: {bri}%", {
-                            sat = tostring(sat), con = tostring(con), bri = tostring(bri),
-                        }),
-                        fontSize = 11,
-                        color = "on_surface_variant",
+            local details = {
+                ui.label({ text = name, fontSize = 14, fontWeight = "bold" }),
+                ui.label({
+                    text = tr("color.summary", "Saturação: {sat}% | Contraste: {con}% | Brilho: {bri}%", {
+                        sat = tostring(sat), con = tostring(con), bri = tostring(bri),
                     }),
+                    fontSize = 11,
+                    color = "on_surface_variant",
                 }),
+            }
+            if isStartupDefault then
+                table.insert(details, ui.label({
+                    text = tr("panel.profiles.startup_default", "Padrão de Inicialização"),
+                    fontSize = 11,
+                    fontWeight = "bold",
+                    color = "primary",
+                }))
+            end
+
+            table.insert(profileRows, ui.row({ key = `profile_{name}`, gap = 6, align = "center", justify = "space_between" }, {
+                ui.column({ gap = 2, flexGrow = 1 }, details),
                 ui.row({ gap = 6, align = "center" }, {
                     ui.button({
                         text = if isActive then tr("panel.profiles.active", "Ativo") else tr("panel.profiles.apply", "Aplicar"),
@@ -515,6 +653,22 @@ local function profilesView()
                         variant = if isActive then "outline" else "primary",
                         enabled = not isActive,
                         onClick = onApply,
+                    }),
+                    ui.button({
+                        key = `profile_default_{name}`,
+                        glyph = "star",
+                        variant = if isStartupDefault then "primary" else "outline",
+                        tooltip = if isStartupDefault then
+                            tr("panel.profiles.clear_startup_default", "Remover '{name}' como padrão de inicialização", { name = name })
+                        else
+                            tr("panel.profiles.set_startup_default", "Definir '{name}' como padrão de inicialização", { name = name }),
+                        onClick = function()
+                            if isStartupDefault then
+                                sendCommand({ action = "rule_clear_default" })
+                            else
+                                sendCommand({ action = "rule_set_default", profile = name })
+                            end
+                        end,
                     }),
                     ui.button({
                         glyph = "trash",
@@ -552,6 +706,7 @@ local function profilesView()
         saveBlock,
         listBlock,
         actionsRow,
+        automationView(automation, profiles),
     })
 end
 
@@ -644,24 +799,40 @@ end
 
 -- ── Event Callbacks ──────────────────────────────────────────────────────────
 
-function onTabPerformance()
-    currentTab = "performance"
+local function notifyPanelOpen()
+    sendCommand({ action = "panel_state", open = true, tab = currentTab })
+    if currentTab == "profiles" then
+        sendCommand({ action = "profile_list" })
+    end
+end
+
+local function showTab(tab)
+    currentTab = tab
+    notifyPanelOpen()
     render()
+end
+
+function onTabPerformance()
+    showTab("performance")
 end
 
 function onTabColor()
-    currentTab = "color"
-    render()
+    showTab("color")
 end
 
 function onTabProfiles()
-    currentTab = "profiles"
-    sendCommand({ action = "profile_list" })
-    render()
+    showTab("profiles")
+end
+
+function onOpen()
+    notifyPanelOpen()
+end
+
+function onClose()
+    sendCommand({ action = "panel_state", open = false })
 end
 
 function onCloseClicked()
-    sendCommand({ action = "panel_state", open = false })
     panel.close()
 end
 
@@ -759,6 +930,14 @@ function onProfileNameChange(text)
     end
 end
 
+function onRulePatternChange(text)
+    local wasEmpty = rulePattern == ""
+    rulePattern = text
+    if wasEmpty ~= (rulePattern == "") then
+        render()
+    end
+end
+
 function onSaveProfileSubmit(text)
     local name = noctalia.string.trim(text)
     if name ~= "" then
@@ -790,9 +969,6 @@ noctalia.state.watch("status", function(newStatus)
     statusData = newStatus
     render()
 end)
-
--- Notify service that panel is open
-sendCommand({ action = "panel_state", open = true })
 
 -- Initial render
 statusData = noctalia.state.get("status")

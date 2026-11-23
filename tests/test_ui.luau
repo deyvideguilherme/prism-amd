@@ -330,6 +330,7 @@ local ui = {
     progress = function(props) return { type = "progress", props = props or {}, children = {} } end,
     button = function(props) return { type = "button", props = props or {}, children = {} } end,
     input = function(props) return { type = "input", props = props or {}, children = {} } end,
+    select = function(props) return { type = "select", props = props or {}, children = {} } end,
 }
 
 local panel = {
@@ -345,21 +346,17 @@ local mockEnv = {
 }
 setmetatable(mockEnv, { __index = getfenv() })
 
--- Execute service, widget, and panel in the shared environment
-local serviceFn = loadstring(sources.service)
-assert(serviceFn ~= nil, "Failed to compile prisma_service.luau")
-setfenv(serviceFn, mockEnv)
-serviceFn()
+local function loadComponent(component, environment)
+    local fn, message = loadstring(sources[component])
+    assert(fn ~= nil, message)
+    setfenv(fn, environment)
+    fn()
+end
 
-local widgetFn = loadstring(sources.widget)
-assert(widgetFn ~= nil, "Failed to compile prisma_widget.luau")
-setfenv(widgetFn, mockEnv)
-widgetFn()
-
-local panelFn = loadstring(sources.panel)
-assert(panelFn ~= nil, "Failed to compile prisma_panel.luau")
-setfenv(panelFn, mockEnv)
-panelFn()
+loadComponent("service", mockEnv)
+loadComponent("widget", mockEnv)
+loadComponent("panel", mockEnv)
+mockEnv.onOpen()
 
 print("=== Prisma Noctalia UI Behavioral Test Suite ===")
 
@@ -883,4 +880,254 @@ noctalia.tr = function(key) return key end
 assertLanguage("Desempenho", "Brilho: 0%")
 noctalia.tr = function() error("translation lookup failed") end
 assertLanguage("Desempenho", "Brilho: 0%")
+
+local function cliResponse(stdout)
+    return { exitCode = 0, stdout = stdout, stderr = "" }
+end
+
+local function newAutomationSession(configuration, deviceAvailable, deferAutomation)
+    local session = { state = {}, commands = {}, pending = {}, deferred = {} }
+    local watchers = {}
+    local windowCommand = "niri msg -j focused-window"
+    local ruleList = "prisma-ctl rule list --json"
+    session.responses = {
+        [ruleList] = cliResponse(configuration),
+        [windowCommand] = cliResponse("null"),
+        ["prisma-ctl profile list --json"] = cliResponse([[
+            [{"name":"desktop","saturation":130,"contrast":110,"brightness":-8,"enabled":0},
+             {"name":"competitivo","saturation":160,"contrast":115,"brightness":10,"enabled":1}]
+        ]]),
+    }
+    session.deferred[ruleList] = deferAutomation
+    local api = table.clone(noctalia)
+    api.tr = translate
+    api.state = {
+        get = function(key) return session.state[key] end,
+        set = function(key, value)
+            session.state[key] = value
+            for _, callback in ipairs(watchers[key] or {}) do callback(value) end
+        end,
+        watch = function(key, callback)
+            watchers[key] = watchers[key] or {}
+            table.insert(watchers[key], callback)
+        end,
+    }
+    api.runAsync = function(command, callback)
+        table.insert(session.commands, command)
+        if session.deferred[command] then
+            table.insert(session.pending, { command = command, callback = callback })
+        else
+            callback(session.responses[command] or cliResponse(""))
+        end
+    end
+
+    local env = {
+        noctalia = api,
+        ui = ui,
+        panel = {
+            render = function(tree) session.tree = tree end,
+            close = function() end,
+        },
+    }
+    setmetatable(env, { __index = getfenv() })
+    session.env = env
+    function session.setDevice(available, saturation, contrast, brightness, enabled)
+        session.responses["prisma-ctl status --json"] = if available
+            then cliResponse(string.format(
+                [[{"device":{"available":true,"saturation":%d,"contrast":%d,"brightness":%d,"enabled":%d}}]],
+                saturation or 130, contrast or 110, brightness or -8, enabled or 0))
+            else { exitCode = 1, stdout = "", stderr = "Device unavailable" }
+    end
+    function session.focus(id, appId)
+        session.responses[windowCommand] = cliResponse(
+            if id then string.format([[{"id":%d,"title":"Window","app_id":"%s"}]], id, appId) else "null"
+        )
+    end
+    function session.advance(ticks)
+        for _ = 1, ticks do env.update() end
+    end
+    function session.count(command)
+        local count = 0
+        for _, ran in ipairs(session.commands) do
+            if ran == command then count += 1 end
+        end
+        return count
+    end
+    function session.send(command)
+        api.state.set("command", command)
+    end
+    session.setDevice(deviceAvailable)
+    loadComponent("service", env)
+    return session
+end
+
+local windowCommand = "niri msg -j focused-window"
+local applyDefault = "prisma-ctl profile apply 'desktop'"
+local applyGame = "prisma-ctl profile apply 'competitivo'"
+local startupConfiguration = [[{"enabled":false,"default_profile":"desktop","rules":[]}]]
+local gameConfiguration = [[{
+    "enabled":true,"default_profile":"desktop",
+    "rules":[{"pattern":"steam_app_*","profile":"desktop"},
+             {"pattern":"steam_app_730","profile":"competitivo"}]
+}]]
+local snapshotConfiguration = [[{
+    "enabled":true,"default_profile":null,"rules":[{"pattern":"steam_app_*","profile":"competitivo"}]
+}]]
+
+print("[test_ui] Running startup profile restoration tests...")
+do
+    local session = newAutomationSession(startupConfiguration, false)
+    assert(session.state.status.automation.default_profile == "desktop")
+    assert(session.count(applyDefault) == 0, "Startup must wait for the device")
+    session.setDevice(true)
+    session.advance(100)
+    assert(session.count(applyDefault) == 1, "Startup must restore the default on the first successful device poll")
+    session.send({ action = "rule_list" })
+    session.advance(200)
+    assert(session.count(applyDefault) == 1, "Startup restoration must run once per service session")
+    assert(session.count(windowCommand) == 0, "Startup restoration must not require Niri or enabled rules")
+
+    local delayed = newAutomationSession(startupConfiguration, true, true)
+    assert(delayed.count(applyDefault) == 0, "Startup must wait for the automation configuration")
+    assert(#delayed.pending == 1 and delayed.pending[1].command == "prisma-ctl rule list --json")
+    delayed.pending[1].callback(delayed.responses["prisma-ctl rule list --json"])
+    assert(delayed.count(applyDefault) == 1, "Default must be restored when configuration is loaded after device confirmation")
+
+    local external = newAutomationSession(startupConfiguration, true)
+    external.focus(42, "steam_app_730")
+    external.responses["prisma-ctl rule list --json"] = cliResponse(gameConfiguration)
+    external.advance(200)
+    assert(external.state.status.automation.enabled, "The service must pick up CLI changes without opening the panel")
+    assert(external.count(applyGame) == 1 and external.count(applyDefault) == 1)
+end
+
+print("[test_ui] Running Niri focus transitions and manual override tests...")
+do
+    local session = newAutomationSession(gameConfiguration, true)
+    assert(session.count(applyDefault) == 1)
+    session.focus(42, "STEAM_APP_730")
+    session.deferred[windowCommand] = true
+    session.advance(60)
+    assert(session.count(windowCommand) == 1 and #session.pending == 1, "Only one Niri request may be in flight")
+    session.deferred[windowCommand] = false
+    table.remove(session.pending).callback(session.responses[windowCommand])
+    assert(session.count(applyGame) == 1 and session.count(applyDefault) == 1, "Exact rule must beat the wildcard")
+    assert(session.state.status.automation.active_rule == "steam_app_730")
+    assert(session.state.status.automation.active_app_id == "STEAM_APP_730")
+    session.advance(40)
+    assert(session.count(applyGame) == 1, "Polling the same window must not reapply the rule")
+    session.focus(nil)
+    session.advance(20)
+    assert(session.count(applyDefault) == 1, "A null focus must not restore the default profile")
+    session.focus(11, "org.mozilla.firefox")
+    session.advance(20)
+    assert(session.count(applyDefault) == 2, "Focusing an unmatched real window must restore the default")
+    assert(session.state.status.automation.active_rule == nil)
+    assert(session.state.status.automation.last_app_id == "org.mozilla.firefox")
+
+    local snapshot = newAutomationSession(snapshotConfiguration, true)
+    snapshot.setDevice(true, 140, 105, -12, 1)
+    snapshot.focus(42, "steam_app_570")
+    snapshot.advance(20)
+    assert(snapshot.count(applyGame) == 1, "Wildcard must apply to matching games")
+    snapshot.send({ action = "set", saturation = 170, immediate = true })
+    snapshot.advance(40)
+    assert(snapshot.count(applyGame) == 1, "A manual change must take precedence on the same window")
+    snapshot.focus(43, "steam_app_570")
+    snapshot.advance(20)
+    assert(snapshot.count(applyGame) == 2, "A different window ID must clear manual override even with the same app ID")
+    snapshot.focus(11, "org.mozilla.firefox")
+    snapshot.advance(20)
+    assert(snapshot.count("prisma-ctl set -s 140 -c 105 -b -12 -e 1") == 1,
+        "Without a default, leaving a rule must restore even changes made outside the service before the game")
+end
+
+print("[test_ui] Running Niri pause and fallback tests...")
+do
+    local session = newAutomationSession(snapshotConfiguration, true)
+    session.send({ action = "panel_state", open = true, tab = "profiles" })
+    session.focus(42, "steam_app_570")
+    session.advance(40)
+    assert(session.count(applyGame) == 0, "Automatic switching must pause while the panel is open")
+    assert(session.state.status.automation.last_app_id == "steam_app_570", "Profiles must still capture an app ID")
+    session.send({ action = "panel_state", open = false })
+    session.advance(20)
+    assert(session.count(applyGame) == 1, "The current focus must be reconciled when the panel closes")
+    session.responses[windowCommand] = { exitCode = 127, stdout = "", stderr = "niri: command not found" }
+    session.advance(20)
+    local niriRequests = session.count(windowCommand)
+    assert(not session.state.status.automation.niri_available)
+    assert(session.state.status.error == nil, "Niri failure must not surface as a device error")
+    session.advance(100)
+    assert(session.count(windowCommand) == niriRequests, "Niri failure must stop background requests")
+
+    local capture = newAutomationSession(startupConfiguration, true)
+    capture.focus(8, "cs2")
+    capture.send({ action = "panel_state", open = true, tab = "performance" })
+    capture.advance(40)
+    assert(capture.count(windowCommand) == 0, "Other tabs must not start focus capture when automation is disabled")
+    capture.send({ action = "panel_state", open = true, tab = "profiles" })
+    capture.advance(20)
+    assert(capture.state.status.automation.last_app_id == "cs2", "Profiles must capture focus with automation disabled")
+
+    local mutation = newAutomationSession(snapshotConfiguration, true)
+    local userCommand = "prisma-ctl set -s 170 -c 110 -b -8 -e 0"
+    mutation.deferred[userCommand] = true
+    mutation.send({ action = "set", saturation = 170, immediate = true })
+    mutation.focus(41, "steam_app_570")
+    mutation.advance(20)
+    assert(mutation.count(applyGame) == 0, "An in-flight mutation must pause automatic switching")
+    assert(#mutation.pending == 1 and mutation.pending[1].command == userCommand)
+    table.remove(mutation.pending).callback(cliResponse(""))
+    mutation.advance(20)
+    assert(mutation.count(applyGame) == 1, "A transition must reconcile after a mutation finishes")
+end
+
+print("[test_ui] Running Profiles automation control tests...")
+do
+    language = "en"
+    local session = newAutomationSession(gameConfiguration, true)
+    session.focus(42, "steam_app_730")
+    session.advance(20)
+    loadComponent("panel", session.env)
+    session.env.onOpen()
+    session.env.onTabProfiles()
+
+    local function control(key)
+        local nodes = findNodes(session.tree, function(node) return node.props.key == key end)
+        assert(#nodes == 1, "Missing or duplicate control " .. key)
+        return nodes[1].props
+    end
+    local function invoke(handler, ...)
+        if type(handler) == "string" then handler = session.env[handler] end
+        assert(type(handler) == "function", "Missing control callback")
+        handler(...)
+    end
+    assert(hasLabelWithText(session.tree, translate("panel.automation.title")))
+    assert(hasLabelWithText(session.tree, translate("panel.profiles.startup_default")))
+    assert(hasLabelWithText(session.tree, translate("panel.automation.active", { pattern = "steam_app_730" })))
+    assert(hasLabelWithText(session.tree, "steam_app_730 → competitivo"))
+    assert(control("rule_pattern_0").placeholder == translate("panel.automation.pattern"))
+    assert(control("rule_add").enabled == false, "An empty pattern must disable Add")
+    invoke(control("profile_default_desktop").onClick)
+    assert(session.state.command.action == "rule_clear_default")
+    invoke(control("profile_default_competitivo").onClick)
+    assert(session.state.command.action == "rule_set_default" and session.state.command.profile == "competitivo")
+    invoke(control("rule_toggle").onClick)
+    assert(session.state.command.action == "rule_toggle")
+    invoke(control("rule_delete_steam_app_730").onClick)
+    assert(session.state.command.action == "rule_delete" and session.state.command.pattern == "steam_app_730")
+
+    invoke(control("rule_use_last_app").onClick)
+    assert(control("rule_pattern_1").value == "steam_app_730", "Last detected app ID must populate the input")
+    invoke(control("rule_pattern_1").onChange, "steam_app_*")
+    invoke(control("rule_profile").onChange, "1", "competitivo")
+    assert(control("rule_add").enabled ~= false)
+    invoke(control("rule_add").onClick)
+    local command = session.state.command
+    assert(command.action == "rule_set" and command.pattern == "steam_app_*" and command.profile == "competitivo")
+    session.responses[windowCommand] = { exitCode = 1, stdout = "", stderr = "Niri socket unavailable" }
+    session.advance(20)
+    assert(hasLabelWithText(session.tree, translate("panel.automation.niri_unavailable")))
+end
 print("All Luau UI behavioral tests PASSED successfully!")

@@ -66,7 +66,23 @@
       "saved": "SAVED PROFILES",
       "reload": "Reload List",
       "restore": "Restore Defaults",
-      "delete": "Delete profile '{name}'"
+      "delete": "Delete profile '{name}'",
+      "startup_default": "Startup Default",
+      "set_startup_default": "Set '{name}' as the startup default",
+      "clear_startup_default": "Remove '{name}' as the startup default"
+    },
+    "automation": {
+      "title": "Automatic Switching (Niri)",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "niri_unavailable": "Niri unavailable",
+      "active": "Active rule: {pattern}",
+      "pattern": "app_id (e.g. cs2, steam_app_*)",
+      "use_last_app": "Use Last Window",
+      "profile": "Select a saved profile",
+      "add": "Add",
+      "empty": "No rules configured",
+      "delete": "Delete rule '{pattern}'"
     },
     "close": "Close",
     "tabs": {
@@ -92,6 +108,7 @@
     "save": "Failed to save profile",
     "apply": "Failed to apply profile",
     "delete": "Failed to delete profile",
-    "reset": "Failed to reset parameters"
+    "reset": "Failed to reset parameters",
+    "automation": "Failed to update automation rules"
   }
 }
