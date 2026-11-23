@@ -43,6 +43,17 @@ uint32_t ctm_property(int fd, uint32_t crtc) {
     throw std::runtime_error("VKMS must expose a CTM property for this test");
 }
 
+uint32_t gamma_property(int fd, uint32_t crtc) {
+    const auto props = drm_ptr<drmModeFreeObjectProperties>(
+        drmModeObjectGetProperties(fd, crtc, DRM_MODE_OBJECT_CRTC));
+    require(!!props, "Could not read CRTC properties");
+    for (uint32_t i = 0; i < props->count_props; ++i) {
+        const auto prop = drm_ptr<drmModeFreeProperty>(drmModeGetProperty(fd, props->props[i]));
+        if (prop && std::string_view(prop->name) == "GAMMA_LUT") return prop->prop_id;
+    }
+    return 0;
+}
+
 uint32_t current_blob(int fd, uint32_t crtc, uint32_t property) {
     const auto props = drm_ptr<drmModeFreeObjectProperties>(
         drmModeObjectGetProperties(fd, crtc, DRM_MODE_OBJECT_CRTC));
@@ -105,7 +116,11 @@ int main(int argc, char** argv) try {
             "Cannot activate VKMS output");
     require(drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1) == 0, "Atomic DRM unavailable");
     const auto property = ctm_property(fd, crtc);
+    const auto gamma_prop = gamma_property(fd, crtc);
     require(current_blob(fd, crtc, property) == 0, "Expected default CTM");
+    if (gamma_prop != 0) {
+        require(current_blob(fd, crtc, gamma_prop) == 0, "Expected default GAMMA_LUT");
+    }
 
     set_prisma(prisma, "enabled=1 saturation=0");
     const auto first = wait_for_ctm(fd, crtc, property, [](auto blob) { return blob != 0; });
@@ -119,8 +134,11 @@ int main(int argc, char** argv) try {
                 "Unexpected Rec.709 coefficient");
     }
 
-    set_prisma(prisma, "contrast=115 brightness=-20");
+    set_prisma(prisma, "saturation=120 contrast=115 brightness=-20");
     wait_for_ctm(fd, crtc, property, [first](auto blob) { return blob != 0 && blob != first; });
+    if (gamma_prop != 0) {
+        wait_for_ctm(fd, crtc, gamma_prop, [](auto blob) { return blob != 0; });
+    }
 
     // Test that neutral identity matrix with signed zero is adopted by Prisma
     drm_color_ctm neutral_identity{};
@@ -152,12 +170,18 @@ int main(int argc, char** argv) try {
     wait_for_ctm(fd, crtc, property, [](auto blob) { return blob != 0; });
     set_prisma(prisma, "enabled=0");
     wait_for_ctm(fd, crtc, property, [](auto blob) { return blob == 0; });
+    if (gamma_prop != 0) {
+        wait_for_ctm(fd, crtc, gamma_prop, [](auto blob) { return blob == 0; });
+    }
 
     set_prisma(prisma, "enabled=1");
     wait_for_ctm(fd, crtc, property, [](auto blob) { return blob != 0; });
     close(prisma);
     require(std::system("/bin/rmmod chroma_amd") == 0, "Cannot unload Prisma");
     require(current_blob(fd, crtc, property) == 0, "Unload left the Prisma CTM active");
+    if (gamma_prop != 0) {
+        require(current_blob(fd, crtc, gamma_prop) == 0, "Unload left the Prisma GAMMA_LUT active");
+    }
     close(fd);
     std::cout << "PASS VKMS CTM commit, external ownership, disable and unload\n";
 } catch (const std::exception& e) {

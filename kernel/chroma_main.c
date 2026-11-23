@@ -112,19 +112,21 @@ static void chroma_refresh(struct work_struct *work)
 	}
 
 	snapshot = chroma_snapshot();
-	if (snapshot.enabled &&
-	    (snapshot.saturation != 100 || snapshot.contrast != 100 || snapshot.brightness)) {
-		chroma_compute_ctm(&ctm, snapshot.saturation, snapshot.contrast, snapshot.brightness);
+	if (snapshot.enabled && snapshot.saturation != 100) {
+		chroma_compute_ctm(&ctm, snapshot.saturation);
 		target = &ctm;
 	}
+	bool need_gamma = snapshot.enabled && (snapshot.contrast != 100 || snapshot.brightness != 0);
+
 	chroma_collect_gpus();
 	list_for_each_entry_safe(gpu, next, &gpus, link) {
 		unsigned int c;
 
-		chroma_update_gpu(gpu, target, &had_ebusy);
+		chroma_update_gpu(gpu, target, snapshot.contrast, snapshot.brightness,
+				  need_gamma, &had_ebusy);
 
 		for (c = 0; c < gpu->num_crtcs; ++c) {
-			if (gpu->owned[c]) {
+			if (gpu->owned[c].ctm || gpu->owned[c].gamma_lut) {
 				has_owned = true;
 				break;
 			}
@@ -153,7 +155,7 @@ static void chroma_refresh(struct work_struct *work)
 	}
 
 	if (!retry_pending) {
-		bool needs_periodic = (target != NULL) || has_owned;
+		bool needs_periodic = (target != NULL) || need_gamma || has_owned;
 
 		raw_spin_lock_irqsave(&discovery_lock, flags);
 		if (!paused && !list_empty(&gpus) && needs_periodic && !timer_pending(&recheck_timer))
@@ -215,7 +217,7 @@ static void chroma_stop(void)
 	unregister_pm_notifier(&chroma_pm_notifier);
 	chroma_pause();
 	list_for_each_entry_safe(gpu, next, &gpus, link) {
-		int ret = chroma_update_gpu(gpu, NULL, NULL);
+		int ret = chroma_update_gpu(gpu, NULL, 100, 0, false, NULL);
 
 		if (ret && ret != -ENODEV)
 			pr_warn("chroma_amd: %s: display color restoration at unload failed: %pe\n",
