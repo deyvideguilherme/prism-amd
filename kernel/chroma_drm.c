@@ -19,10 +19,18 @@ static bool chroma_has_property(struct drm_crtc *crtc, struct drm_property *prop
 static size_t chroma_get_gamma_lut_size(struct drm_crtc *crtc)
 {
 	struct drm_property *size_prop = crtc->dev->mode_config.gamma_lut_size_property;
-	uint64_t val = 0;
+	struct drm_object_properties *props = &crtc->properties;
+	int i;
 
-	if (size_prop && drm_object_property_get_value(&crtc->base, size_prop, &val) == 0 && val >= 2)
-		return (size_t)val;
+	if (size_prop) {
+		for (i = 0; i < props->count; ++i) {
+			if (props->properties[i] == size_prop) {
+				if (props->values[i] >= 2)
+					return (size_t)props->values[i];
+				break;
+			}
+		}
+	}
 
 	if (crtc->gamma_size >= 2)
 		return crtc->gamma_size;
