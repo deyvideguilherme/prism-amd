@@ -19,6 +19,7 @@ void print_help(const char* prog) {
               << "  " << prog << " set [options]                  Adjust hardware color parameters\n"
               << "  " << prog << " telemetry [--json]             Show AMD GPU telemetry sensors\n"
               << "  " << prog << " profile <action> [name]        Manage saved color profiles\n"
+              << "  " << prog << " rule <action> [arguments]      Manage automatic profile switching\n"
               << "  " << prog << " doctor                         Run system and hardware self-diagnostics\n"
               << "  " << prog << " --version | -v                 Show version and protocol ABI information\n"
               << "  " << prog << " --help | -h                    Show this help message\n\n"
@@ -33,6 +34,14 @@ void print_help(const char* prog) {
               << "  list [--json]               List all saved profiles\n"
               << "  delete <name>               Delete a saved profile\n"
               << "  reset                       Reset parameters to default (sat=100 con=100 bri=0 en=1)\n\n"
+              << "Rule Actions:\n"
+              << "  list [--json]               List the startup profile, rules and automation state\n"
+              << "  set <pattern> <profile>     Associate an app_id pattern (case-insensitive, * wildcard) with a profile\n"
+              << "  delete <pattern>            Remove an app_id rule\n"
+              << "  default [--] <profile>      Set the startup and fallback profile\n"
+              << "  default --clear             Clear the startup and fallback profile\n"
+              << "  enable | disable            Turn rule-based switching on or off\n"
+              << "  match <app_id>              Print the matching profile, if any\n\n"
               << "Examples:\n"
               << "  " << prog << " set -s 160 -c 115\n"
               << "  " << prog << " profile save gaming\n"
@@ -278,6 +287,60 @@ int handle_profile(int argc, char* argv[]) {
     }
 }
 
+int handle_rule(int argc, char* argv[]) {
+    const std::string_view action = argc >= 3 ? argv[2] : "";
+    const std::string_view arg = argc >= 4 ? argv[3] : "";
+    try {
+        if (action == "list" && (argc == 3 || (argc == 4 && arg == "--json"))) {
+            const auto automation = prisma::load_automation();
+            if (arg == "--json") {
+                std::cout << prisma::format_automation_json(automation) << '\n';
+            } else {
+                std::cout << "Automatic switching: " << (automation.enabled ? "enabled" : "disabled") << '\n'
+                          << "Startup profile: " << automation.default_profile.value_or("(none)") << '\n'
+                          << "Rules:\n";
+                for (const auto& [pattern, profile] : automation.rules) {
+                    std::cout << "  " << pattern << " -> " << profile << '\n';
+                }
+            }
+            return 0;
+        }
+        if (action == "set" && argc == 5) {
+            prisma::set_rule(arg, argv[4]);
+            return 0;
+        }
+        if (action == "delete" && argc == 4) {
+            if (prisma::delete_rule(arg)) return 0;
+            std::cerr << "Rule not found.\n";
+            return 1;
+        }
+        if (action == "default" && argc == 4) {
+            if (arg == "--clear") prisma::set_default_profile(std::nullopt);
+            else prisma::set_default_profile(std::string(arg));
+            return 0;
+        }
+        if (action == "default" && argc == 5 && arg == "--") {
+            prisma::set_default_profile(std::string(argv[4]));
+            return 0;
+        }
+        if ((action == "enable" || action == "disable") && argc == 3) {
+            prisma::set_automation_enabled(action == "enable");
+            return 0;
+        }
+        if (action == "match" && argc == 4) {
+            const auto profile = prisma::match_rule(prisma::load_automation(), arg);
+            if (!profile) return 1;
+            std::cout << *profile << '\n';
+            return 0;
+        }
+        std::cerr << "Usage: prisma-ctl rule <list|set|delete|default|enable|disable|match> [arguments]\n";
+        return 1;
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << '\n';
+        return 1;
+    }
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -318,6 +381,10 @@ int main(int argc, char* argv[]) {
 
     if (cmd == "profile") {
         return handle_profile(argc, argv);
+    }
+
+    if (cmd == "rule") {
+        return handle_rule(argc, argv);
     }
 
     std::cerr << "Unknown command: '" << cmd << "'\n\n";

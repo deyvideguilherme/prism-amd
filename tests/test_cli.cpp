@@ -9,7 +9,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
+#include <initializer_list>
 #include <iterator>
+#include <string_view>
 #include <thread>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -305,29 +307,62 @@ void test_telemetry_parser() {
     std::cout << "  [PASS] Test 2: SCLK & Mocked Sysfs/HWMON Telemetry Parser passed.\n";
 }
 
+struct CliResult {
+    int exit_code;
+    std::string output;
+};
+
+struct CliProcess {
+    pid_t pid;
+    std::filesystem::path output;
+};
+
+CliProcess start_cli(const std::filesystem::path& config_home,
+                     std::initializer_list<std::string_view> arguments,
+                     const std::filesystem::path& output) {
+    const auto cli = std::filesystem::canonical("/proc/self/exe").parent_path() / "prisma-ctl";
+    std::vector<std::string> strings{"prisma-ctl"};
+    strings.insert(strings.end(), arguments.begin(), arguments.end());
+    std::vector<char*> argv;
+    for (auto& argument : strings) {
+        argv.push_back(argument.data());
+    }
+    argv.push_back(nullptr);
+
+    std::cout.flush();
+    const pid_t child = ::fork();
+    assert(child >= 0);
+    if (child == 0) {
+        if (!std::freopen(output.c_str(), "w", stdout) ||
+            ::setenv("XDG_CONFIG_HOME", config_home.c_str(), 1) != 0) {
+            ::_exit(127);
+        }
+        ::execv(cli.c_str(), argv.data());
+        ::_exit(127);
+    }
+    return {child, output};
+}
+
+CliResult wait_cli(const CliProcess& process) {
+    int status;
+    assert(::waitpid(process.pid, &status, 0) == process.pid);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) != 127);
+    std::ifstream stream(process.output);
+    return {WEXITSTATUS(status), std::string(std::istreambuf_iterator<char>(stream), {})};
+}
+
+CliResult run_cli(const std::filesystem::path& config_home, std::initializer_list<std::string_view> arguments) {
+    return wait_cli(start_cli(config_home, arguments, config_home / "stdout"));
+}
+
 void test_profile_list_output() {
     TemporaryDirectory fixture;
     const auto profiles = fixture.path / "prisma" / "profiles";
-    const auto output = fixture.path / "stdout";
-    const auto cli = std::filesystem::canonical("/proc/self/exe").parent_path() / "prisma-ctl";
-    std::cout.flush();
     const auto list = [&](bool json) {
-        const pid_t child = ::fork();
-        assert(child >= 0);
-        if (child == 0) {
-            if (!std::freopen(output.c_str(), "w", stdout) ||
-                ::setenv("XDG_CONFIG_HOME", fixture.path.c_str(), 1) != 0) {
-                ::_exit(1);
-            }
-            ::execl(cli.c_str(), "prisma-ctl", "profile", "list", json ? "--json" : nullptr,
-                    static_cast<const char*>(nullptr));
-            ::_exit(1);
-        }
-        int status;
-        assert(::waitpid(child, &status, 0) == child);
-        assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
-        std::ifstream stream(output);
-        return std::string(std::istreambuf_iterator<char>(stream), {});
+        const auto result = json ? run_cli(fixture.path, {"profile", "list", "--json"})
+                                 : run_cli(fixture.path, {"profile", "list"});
+        assert(result.exit_code == 0);
+        return result.output;
     };
 
     assert(list(false) == "No saved profiles found in " + profiles.string() + "\n");
@@ -342,6 +377,174 @@ void test_profile_list_output() {
            R"([{"name": "Ciné \"HDR\"", "saturation": 120, "contrast": 105, "brightness": -5, "enabled": 0}, )"
            R"({"name": "jogos", "saturation": 160, "contrast": 115, "brightness": 10, "enabled": 1}])"
            "\n");
+}
+
+std::string compact_json(std::string_view json) {
+    std::string result;
+    bool quoted = false;
+    bool escaped = false;
+    for (const char ch : json) {
+        if (quoted || (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n')) {
+            result += ch;
+        }
+        if (ch == '"' && !escaped) {
+            quoted = !quoted;
+        }
+        escaped = quoted && ch == '\\' && !escaped;
+    }
+    return result;
+}
+
+void test_automation_rules() {
+    std::cout << "[test_cli] Running automation rule tests...\n";
+    TemporaryDirectory fixture;
+    const auto profiles = fixture.path / "prisma" / "profiles";
+    const auto run = [&](std::initializer_list<std::string_view> arguments) {
+        return run_cli(fixture.path, arguments);
+    };
+    const auto expect_json = [&](std::string_view expected) {
+        const auto result = run({"rule", "list", "--json"});
+        assert(result.exit_code == 0);
+        assert(compact_json(result.output) == expected);
+    };
+    expect_json(R"({"enabled":false,"default_profile":null,"rules":[]})");
+    save_profile("Ciné \"HDR\"", {120, 105, -5, 0}, profiles);
+    save_profile("competitivo", {160, 115, 10, 1}, profiles);
+    save_profile("fallback", {100, 100, 0, 1}, profiles);
+
+    for (const auto& pattern : {"steam_app_*", "SeMi*End", "*", "steam_*"}) {
+        assert(run({"rule", "set", pattern, "fallback"}).exit_code == 0);
+    }
+    assert(run({"rule", "set", "STEAM_APP_730", "competitivo"}).exit_code == 0);
+    assert(run({"rule", "set", "steam_app_*", "Ciné \"HDR\""}).exit_code == 0);
+    assert(run({"rule", "set", "*mi123end", "competitivo"}).exit_code == 0);
+    assert(run({"rule", "set", "app?id", "competitivo"}).exit_code == 0);
+    assert(run({"rule", "default", "Ciné \"HDR\""}).exit_code == 0);
+    assert(run({"rule", "enable"}).exit_code == 0);
+    expect_json(R"({"enabled":true,"default_profile":"Ciné \"HDR\"","rules":[)"
+                R"({"pattern":"*","profile":"fallback"},{"pattern":"*mi123end","profile":"competitivo"},)"
+                R"({"pattern":"app?id","profile":"competitivo"},{"pattern":"semi*end","profile":"fallback"},)"
+                R"({"pattern":"steam_*","profile":"fallback"},{"pattern":"steam_app_*","profile":"Ciné \"HDR\""},)"
+                R"({"pattern":"steam_app_730","profile":"competitivo"}]})");
+    const auto text_list = run({"rule", "list"});
+    assert(text_list.exit_code == 0);
+    assert(text_list.output.find("steam_app_730") != std::string::npos);
+    assert(text_list.output.find("Ciné \"HDR\"") != std::string::npos);
+
+    const auto expect_match = [&](std::string_view app_id, std::string_view profile) {
+        const auto result = run({"rule", "match", app_id});
+        assert(result.exit_code == 0);
+        assert(result.output == std::string(profile) + "\n");
+    };
+    expect_match("STEAM_APP_730", "competitivo");
+    expect_match("steam_app_42", "Ciné \"HDR\"");
+    expect_match("steam_app_", "Ciné \"HDR\"");
+    expect_match("SEMI123END", "competitivo");
+    expect_match("app?id", "competitivo");
+    expect_match("appXid", "fallback");
+    assert(run({"rule", "set", "se*123end", "Ciné \"HDR\""}).exit_code == 0);
+    expect_match("semi123end", "competitivo");
+
+    assert(run({"rule", "disable"}).exit_code == 0);
+    assert(compact_json(run({"rule", "list", "--json"}).output).starts_with(R"({"enabled":false,)"));
+    expect_match("STEAM_APP_730", "competitivo");
+    assert(run({"rule", "delete", "STEAM_APP_730"}).exit_code == 0);
+    assert(run({"rule", "delete", "steam_app_730"}).exit_code == 1);
+    expect_match("STEAM_APP_730", "Ciné \"HDR\"");
+    assert(run({"rule", "default", "--clear"}).exit_code == 0);
+    assert(compact_json(run({"rule", "list", "--json"}).output).find(R"("default_profile":null)") != std::string::npos);
+    assert(run({"rule", "default", "Ciné \"HDR\""}).exit_code == 0);
+    assert(run({"rule", "set", "missing", "missing"}).exit_code != 0);
+    assert(run({"rule", "default", "missing"}).exit_code != 0);
+    std::filesystem::create_symlink(profiles / "competitivo.conf", profiles / "alias.conf");
+    assert(run({"rule", "set", "missing", "alias"}).exit_code != 0);
+    assert(run({"rule", "default", "alias"}).exit_code != 0);
+    const std::string max_pattern(128, 'x');
+    assert(run({"rule", "set", max_pattern, "competitivo"}).exit_code == 0);
+    expect_match(max_pattern, "competitivo");
+    assert(run({"rule", "delete", max_pattern}).exit_code == 0);
+    for (const auto& invalid : std::vector<std::string>{"", "app id", "app\tid", "app\nid", "app\x7f", std::string(129, 'x')}) {
+        assert(run({"rule", "set", invalid, "fallback"}).exit_code != 0);
+        assert(run({"rule", "delete", invalid}).exit_code != 0);
+    }
+
+    assert(run({"profile", "delete", "Ciné \"HDR\""}).exit_code == 0);
+    expect_json(R"({"enabled":false,"default_profile":null,"rules":[)"
+                R"({"pattern":"*","profile":"fallback"},{"pattern":"*mi123end","profile":"competitivo"},)"
+                R"({"pattern":"app?id","profile":"competitivo"},{"pattern":"semi*end","profile":"fallback"},)"
+                R"({"pattern":"steam_*","profile":"fallback"}]})");
+    assert(run({"rule", "delete", "*"}).exit_code == 0);
+    const auto miss = run({"rule", "match", "firefox"});
+    assert(miss.exit_code == 1 && miss.output.empty());
+}
+
+void test_automation_file_safety() {
+    TemporaryDirectory fixture;
+    const auto config = fixture.path / "prisma";
+    const auto file = config / "automation.conf";
+    const auto outside = fixture.path / "outside";
+    std::filesystem::create_directory(config);
+    std::ofstream(outside) << "enabled=1\n";
+
+    const auto expect_rejected = [&] {
+        assert(run_cli(fixture.path, {"rule", "list", "--json"}).exit_code != 0);
+        assert(run_cli(fixture.path, {"rule", "enable"}).exit_code != 0);
+    };
+    std::filesystem::create_symlink(outside, file);
+    expect_rejected();
+    assert(std::filesystem::is_symlink(file));
+    std::filesystem::remove(file);
+    std::filesystem::create_hard_link(outside, file);
+    expect_rejected();
+    assert(std::filesystem::equivalent(outside, file));
+    std::filesystem::remove(file);
+    assert(::mkfifo(file.c_str(), 0600) == 0);
+    expect_rejected();
+    std::filesystem::remove(file);
+    std::filesystem::create_directory(file);
+    expect_rejected();
+    std::filesystem::remove(file);
+    TemporaryDirectory redirected_fixture;
+    const auto redirect = redirected_fixture.path / "redirect";
+    std::filesystem::create_directory(redirect);
+    std::filesystem::create_directory_symlink(redirect, redirected_fixture.path / "prisma");
+    assert(run_cli(redirected_fixture.path, {"rule", "list", "--json"}).exit_code != 0);
+    assert(run_cli(redirected_fixture.path, {"rule", "enable"}).exit_code != 0);
+    assert(std::filesystem::is_empty(redirect));
+    std::string line;
+    std::getline(std::ifstream(outside), line);
+    assert(line == "enabled=1");
+    assert(run_cli(fixture.path, {"rule", "enable"}).exit_code == 0);
+    struct stat info{};
+    assert(::stat(file.c_str(), &info) == 0);
+    assert((info.st_mode & 0777) == 0600);
+}
+
+void test_concurrent_automation_changes() {
+    TemporaryDirectory fixture;
+    const auto profiles = fixture.path / "prisma" / "profiles";
+    save_profile("gaming", {160, 115, 10, 1}, profiles);
+    const std::initializer_list<std::string_view> patterns = {"cs2", "dota2", "portal2", "steam_app_*", "steam_app_730", "game-*"};
+    std::vector<CliProcess> writes;
+    for (const auto pattern : patterns) {
+        writes.push_back(start_cli(fixture.path, {"rule", "set", pattern, "gaming"}, fixture.path / pattern));
+    }
+    for (const auto& process : writes) {
+        assert(wait_cli(process).exit_code == 0);
+    }
+    const auto list = run_cli(fixture.path, {"rule", "list", "--json"});
+    assert(list.exit_code == 0);
+    for (const auto pattern : patterns) {
+        assert(list.output.find('"' + std::string(pattern) + '"') != std::string::npos);
+    }
+
+    const auto set = start_cli(fixture.path, {"rule", "set", "eldenring", "gaming"}, fixture.path / "set");
+    const auto deletion = start_cli(fixture.path, {"profile", "delete", "gaming"}, fixture.path / "delete");
+    assert(wait_cli(deletion).exit_code == 0);
+    const int result = wait_cli(set).exit_code;
+    assert(result == 0 || result == 1);
+    assert(compact_json(run_cli(fixture.path, {"rule", "list", "--json"}).output) ==
+           R"({"enabled":false,"default_profile":null,"rules":[]})");
 }
 
 void test_profiles_manager() {
@@ -628,6 +831,9 @@ int main() {
     test_telemetry_parser();
     test_profiles_manager();
     test_profile_list_output();
+    test_automation_rules();
+    test_automation_file_safety();
+    test_concurrent_automation_changes();
     test_power_cap_and_apu_heuristics();
     std::cout << "All CLI unit tests PASSED successfully!\n";
     return 0;
