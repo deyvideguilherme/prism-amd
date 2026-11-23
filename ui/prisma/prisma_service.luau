@@ -266,12 +266,11 @@ local function flushSetCommand()
             lastErrorMessage = ""
         else
             mutationErrorSeq += 1
-            if not isDirty then
-                pendingState.saturation = deviceState.saturation
-                pendingState.contrast = deviceState.contrast
-                pendingState.brightness = deviceState.brightness
-                pendingState.enabled = deviceState.enabled
-            end
+            isDirty = false
+            pendingState.saturation = deviceState.saturation
+            pendingState.contrast = deviceState.contrast
+            pendingState.brightness = deviceState.brightness
+            pendingState.enabled = deviceState.enabled
             lastErrorMessage = noctalia.string.trim(result.stderr or result.stdout or "Falha ao aplicar parâmetros")
             log(`Erro ao aplicar comando set: {lastErrorMessage}`)
         end

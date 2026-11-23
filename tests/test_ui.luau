@@ -467,12 +467,11 @@ local function flushSetCommand()
             lastErrorMessage = ""
         else
             mutationErrorSeq += 1
-            if not isDirty then
-                pendingState.saturation = deviceState.saturation
-                pendingState.contrast = deviceState.contrast
-                pendingState.brightness = deviceState.brightness
-                pendingState.enabled = deviceState.enabled
-            end
+            isDirty = false
+            pendingState.saturation = deviceState.saturation
+            pendingState.contrast = deviceState.contrast
+            pendingState.brightness = deviceState.brightness
+            pendingState.enabled = deviceState.enabled
             lastErrorMessage = noctalia.string.trim(result.stderr or result.stdout or "Falha ao aplicar parâmetros")
             log(`Erro ao aplicar comando set: {lastErrorMessage}`)
         end
@@ -1892,10 +1891,16 @@ mockEnv.onPresetCompetitive()
 assert(#pendingAsyncCallbacks == 1, "Scenario 7: preset competitive must trigger set command")
 assert(hasLabelWithText(mockPanel.tree, "160%"), "Scenario 7: panel must show optimistic 160%")
 
+-- Enfileirar outro comando enquanto o primeiro está em andamento (isDirty = true)
+mockEnv.noctalia.state.set("command", { action = "set", saturation = 180, immediate = false })
+
 -- Simular falha na execução de prisma-ctl set (exitCode ~= 0)
 local failedCmd = table.remove(pendingAsyncCallbacks, 1)
-deferSetCommands = false
 failedCmd.cb({ exitCode = 1, stdout = "", stderr = "Device I/O error" })
+
+-- Ao falhar, isDirty deve ser zerado e nenhum segundo comando deve ser disparado com valor stale
+assert(#pendingAsyncCallbacks == 0, "Scenario 7: no subsequent set command must be queued/dispatched on failure")
+deferSetCommands = false
 
 -- O painel deve limpar hasPendingColorUpdate e restaurar 100% (deviceState real)
 local treeAfterError = mockPanel.tree
