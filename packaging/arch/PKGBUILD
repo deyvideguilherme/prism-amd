@@ -60,7 +60,11 @@ package() {
     # 2. DKMS module source
     local _dkms_dir="$pkgdir/usr/src/chroma-amd-$pkgver"
     install -dm755 "$_dkms_dir"
-    install -m644 "$_root/kernel/chroma_amd.c" "$_dkms_dir/"
+    install -m644 "$_root/kernel/chroma_main.c" "$_dkms_dir/"
+    install -m644 "$_root/kernel/chroma_ctm.c" "$_dkms_dir/"
+    install -m644 "$_root/kernel/chroma_drm.c" "$_dkms_dir/"
+    install -m644 "$_root/kernel/chroma_iface.c" "$_dkms_dir/"
+    install -m644 "$_root/kernel/chroma_internal.h" "$_dkms_dir/"
     install -m644 "$_root/kernel/prisma_abi.h" "$_dkms_dir/"
     install -m644 "$_root/kernel/Makefile" "$_dkms_dir/"
     install -m644 "$_root/kernel/dkms.conf" "$_dkms_dir/"

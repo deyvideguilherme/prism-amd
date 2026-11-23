@@ -1,4 +1,5 @@
 obj-m += chroma_amd.o
+chroma_amd-y := chroma_main.o chroma_ctm.o chroma_drm.o chroma_iface.o
 
 ifneq ($(srctree),)
 ifneq ($(shell grep -l "^drm_atomic_commit_alloc" "$(srctree)/include/drm/drm_atomic.h"),)

@@ -86,7 +86,7 @@ sudo ln -sf ~/.local/bin/prisma-ctl /usr/local/bin/prisma-ctl
 
 ### Compilação dos componentes históricos
 
-As opções abaixo habilitam a camada Vulkan e o interceptor DRM via `LD_PRELOAD`. São componentes experimentais independentes do módulo e da CLI. Vulkan exige os headers Vulkan e `glslangValidator` ou `glslc`. O interceptor DRM exige `pkg-config` e os headers de libdrm. Ambos usam a configuração descrita em `chroma.conf.example`.
+As opções abaixo habilitam a camada Vulkan e o interceptor DRM via `LD_PRELOAD`. São componentes experimentais independentes do módulo e da CLI. Vulkan exige os headers Vulkan e `glslangValidator` ou `glslc`. O interceptor DRM exige `pkg-config` e os headers de libdrm. Ambos usam a configuração descrita em `legacy/chroma.conf.example`.
 
 ```bash
 cmake -S . -B build-legacy -DPRISMA_BUILD_LEGACY_VULKAN=ON -DPRISMA_BUILD_LEGACY_DRM=ON

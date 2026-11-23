@@ -53,21 +53,28 @@ Interface gráfica oficial integrada ao Noctalia Shell no compositor Niri:
   - **Tela & Cor:** Chave mestre de calibragem, trackbars interativas de 25 segmentos clicáveis para Saturação, Contraste e Brilho, campo de entrada numérica direta (`width = 64`), botões de ajuste fino (`-1`/`+1`), restauração individual e presets rápidos (Padrão, Competitivo, Cinema e Monocromático). Mantém `hasPendingColorUpdate` para reter o valor clicado localmente até confirmação do driver.
   - **Perfis:** Formulário de salvamento do estado atual, listagem de perfis salvos com ações de aplicar/remover e restauração aos padrões de fábrica.
 
+> [!NOTE]
+> **Arquitetura de execução do plugin Noctalia Shell (API 36):** O runtime do Noctalia carrega cada componente (`service`, `widget`, `panel`) em instâncias isoladas a partir de seus arquivos de entrada declarados em `plugin.toml`, sem suporte a `require()` relativo entre módulos locais dentro do diretório do plugin. Por essa razão, `prisma_panel.luau` é mantido como uma unidade coesa, estruturada em funções e helpers modulares internos, prevenindo falhas de resolução dinâmica em produção.
+
 ---
 
 ## 2. Inventário de Arquivos do Repositório
 
 | Arquivo / Diretório | Responsabilidade Única |
 | :--- | :--- |
-| `kernel/chroma_amd.c` | Código-fonte do módulo de kernel. Descobre dispositivos AMDGPU, aplica CTM em commits validados e expõe a ABI v1. |
-| `kernel/Makefile` | Automação de compilação Kbuild com detecção de `LLVM=1` para CachyOS, carga (`load`), descarga (`unload`) e instalação de regras udev (`install-udev`). |
+| `kernel/chroma_main.c` | Ponto de entrada do módulo de kernel (`module_init`/`module_exit`), estado/configuração global, workqueue, timer de rechecagem e PM suspend/resume notifier. |
+| `kernel/chroma_ctm.c` | Cálculo da matriz CTM Rec.709 (saturação, contraste, brilho), conversão em ponto fixo DRM S31.32 e detecção de matriz identidade. |
+| `kernel/chroma_drm.c` | Varredura PCI proativa, fila de descoberta, hook Kprobe em `drm_atomic_helper_commit`, commits atômicos DRM/KMS e ciclo de vida de GPUs. |
+| `kernel/chroma_iface.c` | Dispositivo de caractere `/dev/chroma_amd` (`read`/`write`/`ioctl`), parser textual de configuração e atributos sysfs em `/sys/kernel/chroma_amd/`. |
+| `kernel/chroma_internal.h` | Cabeçalho interno com definições de estruturas (`chroma_gpu`), sincronização e protótipos compartilhados do módulo. |
+| `kernel/Makefile` | Automação de compilação Kbuild (`chroma_amd.ko` a partir dos 4 objetos modulares), detecção de `LLVM=1`, carga e descarga. |
 | `kernel/70-chroma-amd.rules` | Regra devtmpfs atribuindo o dispositivo `/dev/chroma_amd` ao grupo `video` com permissões `0660`. |
 | `kernel/dkms.conf` | Metadados do DKMS para compilação automática do módulo a cada atualização do kernel Linux. |
 | `src/cli/device.hpp` / `device.cpp` | Controlador POSIX I/O para `/dev/chroma_amd`, validação de limites de parâmetros e tratamento detalhado de erros do sistema. |
 | `src/cli/telemetry.hpp` / `telemetry.cpp` | Descoberta dinâmica de GPU AMD (`vendor == 0x1002`), leitura de métricas sysfs e hwmon e formatadores texto/JSON. |
 | `src/cli/profiles.hpp` / `profiles.cpp` | Serialização, carregamento, listagem e exclusão de perfis INI em `~/.config/prisma/profiles/`. |
 | `src/cli/main.cpp` | Ponto de entrada do executável `prisma-ctl`, despachando `status`, `set`, `telemetry`, `profile`, `doctor` e as opções de versão e ajuda. |
-| `src/drm_ctm.hpp` / `drm_ctm.cpp` | Biblioteca userspace de cálculo matemático da matriz CTM Rec.709 e conversão para ponto fixo DRM S31.32. |
+| `legacy/` | Componentes históricos opcionais: hook DRM via `LD_PRELOAD` (`drm_hook.cpp`, `drm_ctm.cpp`), camada Vulkan (`layer.cpp`, `shader.comp`), manifesto e exemplo de configuração. |
 | `tests/test_ctm.cpp` | Testes unitários de validação matemática do ponto fixo S31.32 e saturação Rec.709. |
 | `tests/test_cli.cpp` | Testes unitários do parser de dispositivo, validação de limites, telemetria mockada e gerenciador de perfis. |
 | `ui/prisma/plugin.toml` | Manifesto do plugin oficial para Noctalia Shell. |
@@ -144,7 +151,7 @@ O comando `prisma-ctl status --json` emite um objeto JSON no stdout com a seguin
 
 ## 4. Compilação e testes
 
-O CMake padrão constrói a CLI e os testes de userspace (`test_cli` e `check_ui`). Os caminhos históricos em `src/layer.cpp` e `src/drm_hook.cpp` têm opções de compilação independentes, descritas no README. O PKGBUILD instala a CLI, a fonte DKMS, a regra udev e os arquivos do plugin. `tests/test_kernel_abi.cpp` cobre o dispositivo real em uma VM. Os testes de CTM em VKMS usam um módulo de teste e um driver virtual configurado para expor a propriedade.
+O CMake padrão constrói a CLI e os testes de userspace (`test_cli` e `check_ui`). Os caminhos históricos em `legacy/layer.cpp` e `legacy/drm_hook.cpp` têm opções de compilação independentes, descritas no README. O PKGBUILD instala a CLI, a fonte DKMS, a regra udev e os arquivos do plugin. `tests/test_kernel_abi.cpp` cobre o dispositivo real em uma VM. Os testes de CTM em VKMS usam um módulo de teste e um driver virtual configurado para expor a propriedade.
 
 ### Suíte de Testes Comportamentais da UI Luau (`tests/test_ui.luau`)
 
