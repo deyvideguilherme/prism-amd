@@ -253,6 +253,7 @@ local telemetryState = {
     temp_edge_c = 0,
     temp_junction_c = 0,
     power_watts = 0,
+    power_cap_watts = 0,
 }
 
 -- Ring-buffers (up to 60 historical samples)
@@ -318,6 +319,7 @@ local function publishStatus()
             temp_edge_c = telemetryState.temp_edge_c,
             temp_junction_c = telemetryState.temp_junction_c,
             power_watts = telemetryState.power_watts,
+            power_cap_watts = telemetryState.power_cap_watts,
         },
         history = {
             gpu_busy = historyGpu,
@@ -383,6 +385,7 @@ local function pollStatus(onComplete)
                     telemetryState.temp_edge_c = if type(telem.temp_edge_c) == "number" then telem.temp_edge_c else 0
                     telemetryState.temp_junction_c = if type(telem.temp_junction_c) == "number" then telem.temp_junction_c else 0
                     telemetryState.power_watts = if type(telem.power_watts) == "number" then telem.power_watts else 0
+                    telemetryState.power_cap_watts = if type(telem.power_cap_watts) == "number" then telem.power_cap_watts else 0
                 end
 
                 local effectiveTemp = if telemetryState.temp_junction_c > 0 then telemetryState.temp_junction_c else telemetryState.temp_edge_c
@@ -752,7 +755,9 @@ local function performanceView()
 
     local isApu = (telem.is_apu == true) or (telem.gpu_type == "APU")
     local powerW = if type(telem.power_watts) == "number" then math.floor(telem.power_watts + 0.5) else 0
-    local powerMaxW = if isApu then 65 else 300
+    local powerMaxW = if type(telem.power_cap_watts) == "number" and telem.power_cap_watts > 0
+        then math.max(1, math.floor(telem.power_cap_watts + 0.5))
+        else (if isApu then 65 else 300)
 
     local vramUsed = if type(telem.vram_used_mib) == "number" then telem.vram_used_mib else 0
     local vramTotal = if type(telem.vram_total_mib) == "number" and telem.vram_total_mib > 0 then telem.vram_total_mib else 1
@@ -1945,5 +1950,97 @@ end)
 assert(#saveBtnsCleared == 1, "Scenario 8: 'Salvar' button must exist after clearing")
 assert(saveBtnsCleared[1].props.enabled == false, "Scenario 8: 'Salvar' button must be disabled immediately after clearing")
 print("  [PASS] Scenario 8 passed.")
+
+-- Cenário 9 — Teto dinâmico de potência (power_cap_watts) vs. fallbacks (65W APU / 300W dGPU)
+print("[test_ui] Running Scenario 9: Dynamic power_cap_watts and fallbacks...")
+
+-- Sub-cenário 9.1: dGPU com power_cap_watts real (ex: 180W)
+mockStatusResponse = {
+    exitCode = 0,
+    stdout = [[{"device":{"available":true,"enabled":1,"saturation":100,"contrast":100,"brightness":0},"telemetry":{"card":"card1","gpu_name":"AMD Radeon RX 9060 XT","gpu_type":"dGPU","pci_id":"0000:2d:00.0","device_id":"1002:7590","is_apu":false,"gpu_busy_percent":15,"sclk_mhz":1800,"vram_used_mib":2048.0,"vram_total_mib":8192.0,"gtt_used_mib":null,"gtt_total_mib":null,"temp_edge_c":48.0,"temp_junction_c":58.0,"power_watts":90.0,"power_cap_watts":180.0}}]],
+    stderr = "",
+}
+for _ = 1, 20 do
+    mockEnv.update()
+end
+mockEnv.onTabPerformance()
+local tree9_1 = mockPanel.tree
+assert(tree9_1 ~= nil, "Scenario 9.1: tree must not be nil")
+assert(hasLabelWithText(tree9_1, "Teto: 180 W"), "Scenario 9.1: panel must display dynamic 'Teto: 180 W'")
+local pbars9_1 = findProgressBars(tree9_1)
+local foundPower9_1 = false
+for _, p in ipairs(pbars9_1) do
+    if math.abs(p.props.progress - (90 / 180)) < 0.005 then foundPower9_1 = true end
+end
+assert(foundPower9_1, "Scenario 9.1: power progress bar must reflect 90/180 ratio (0.5)")
+
+-- Sub-cenário 9.2: APU com power_cap_watts real (ex: 35W)
+mockStatusResponse = {
+    exitCode = 0,
+    stdout = [[{"device":{"available":true,"enabled":1,"saturation":100,"contrast":100,"brightness":0},"telemetry":{"card":"card1","gpu_name":"AMD Ryzen 5 5600GT","gpu_type":"APU","pci_id":"0000:05:00.0","device_id":"1002:1638","is_apu":true,"gpu_busy_percent":10,"sclk_mhz":1200,"vram_used_mib":512.0,"vram_total_mib":512.0,"gtt_used_mib":1024.0,"gtt_total_mib":8192.0,"temp_edge_c":42.0,"temp_junction_c":null,"power_watts":14.0,"power_cap_watts":35.0}}]],
+    stderr = "",
+}
+for _ = 1, 20 do
+    mockEnv.update()
+end
+mockEnv.onTabPerformance()
+local tree9_2 = mockPanel.tree
+assert(tree9_2 ~= nil, "Scenario 9.2: tree must not be nil")
+assert(hasLabelWithText(tree9_2, "Teto: 35 W"), "Scenario 9.2: panel must display dynamic 'Teto: 35 W' for APU")
+local pbars9_2 = findProgressBars(tree9_2)
+local foundPower9_2 = false
+for _, p in ipairs(pbars9_2) do
+    if math.abs(p.props.progress - (14 / 35)) < 0.005 then foundPower9_2 = true end
+end
+assert(foundPower9_2, "Scenario 9.2: power progress bar must reflect 14/35 ratio (0.4)")
+
+-- Sub-cenário 9.3: Fallback dGPU quando power_cap_watts for ausente/null -> 300W
+mockStatusResponse = {
+    exitCode = 0,
+    stdout = [[{"device":{"available":true,"enabled":1,"saturation":100,"contrast":100,"brightness":0},"telemetry":{"card":"card1","gpu_name":"AMD Radeon RX 9060 XT","gpu_type":"dGPU","pci_id":"0000:2d:00.0","device_id":"1002:7590","is_apu":false,"gpu_busy_percent":15,"sclk_mhz":1800,"vram_used_mib":2048.0,"vram_total_mib":8192.0,"gtt_used_mib":null,"gtt_total_mib":null,"temp_edge_c":48.0,"temp_junction_c":58.0,"power_watts":60.0,"power_cap_watts":null}}]],
+    stderr = "",
+}
+for _ = 1, 20 do
+    mockEnv.update()
+end
+mockEnv.onTabPerformance()
+local tree9_3 = mockPanel.tree
+assert(tree9_3 ~= nil, "Scenario 9.3: tree must not be nil")
+assert(hasLabelWithText(tree9_3, "Teto: 300 W"), "Scenario 9.3: panel must fallback to 'Teto: 300 W' when power_cap_watts is null")
+
+-- Sub-cenário 9.4: Fallback APU quando power_cap_watts for ausente/null -> 65W
+mockStatusResponse = {
+    exitCode = 0,
+    stdout = [[{"device":{"available":true,"enabled":1,"saturation":100,"contrast":100,"brightness":0},"telemetry":{"card":"card1","gpu_name":"AMD Ryzen 5 5600GT","gpu_type":"APU","pci_id":"0000:05:00.0","device_id":"1002:1638","is_apu":true,"gpu_busy_percent":10,"sclk_mhz":1200,"vram_used_mib":512.0,"vram_total_mib":512.0,"gtt_used_mib":1024.0,"gtt_total_mib":8192.0,"temp_edge_c":42.0,"temp_junction_c":null,"power_watts":20.0}}]],
+    stderr = "",
+}
+for _ = 1, 20 do
+    mockEnv.update()
+end
+mockEnv.onTabPerformance()
+local tree9_4 = mockPanel.tree
+assert(tree9_4 ~= nil, "Scenario 9.4: tree must not be nil")
+assert(hasLabelWithText(tree9_4, "Teto: 65 W"), "Scenario 9.4: panel must fallback to 'Teto: 65 W' when power_cap_watts is missing")
+
+-- Sub-cenário 9.5: Guarda contra divisão por zero se sensor retornar valor fracionário baixo (ex: 0.3W)
+mockStatusResponse = {
+    exitCode = 0,
+    stdout = [[{"device":{"available":true,"enabled":1,"saturation":100,"contrast":100,"brightness":0},"telemetry":{"card":"card1","gpu_name":"AMD Radeon RX 9060 XT","gpu_type":"dGPU","pci_id":"0000:2d:00.0","device_id":"1002:7590","is_apu":false,"gpu_busy_percent":5,"sclk_mhz":500,"vram_used_mib":2048.0,"vram_total_mib":8192.0,"gtt_used_mib":null,"gtt_total_mib":null,"temp_edge_c":40.0,"temp_junction_c":45.0,"power_watts":1.0,"power_cap_watts":0.3}}]],
+    stderr = "",
+}
+for _ = 1, 20 do
+    mockEnv.update()
+end
+mockEnv.onTabPerformance()
+local tree9_5 = mockPanel.tree
+assert(tree9_5 ~= nil, "Scenario 9.5: tree must not be nil")
+assert(hasLabelWithText(tree9_5, "Teto: 1 W"), "Scenario 9.5: panel must clamp floor powerMaxW to at least 1 W")
+local pbars9_5 = findProgressBars(tree9_5)
+local foundPower9_5 = false
+for _, p in ipairs(pbars9_5) do
+    if math.abs(p.props.progress - 1.0) < 0.005 then foundPower9_5 = true end
+end
+assert(foundPower9_5, "Scenario 9.5: power progress bar must not divide by zero and reach 1.0 ratio")
+print("  [PASS] Scenario 9 passed.")
 
 print("All Luau UI behavioral tests PASSED successfully!")

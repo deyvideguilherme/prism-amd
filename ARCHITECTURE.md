@@ -111,7 +111,8 @@ O comando `prisma-ctl status --json` emite um objeto JSON no stdout com a seguin
     "gtt_total_mib": 16000.0,
     "temp_edge_c": 41.0,
     "temp_junction_c": 43.0,
-    "power_watts": 22.0
+    "power_watts": 22.0,
+    "power_cap_watts": 180.0
   }
 }
 ```
@@ -144,8 +145,17 @@ O comando `prisma-ctl status --json` emite um objeto JSON no stdout com a seguin
 | `temp_edge_c` | Float \| null | Flutuante (°C) | Temperatura do sensor de borda (`edge`) do encapsulamento da GPU. |
 | `temp_junction_c` | Float \| null | Flutuante (°C) | Temperatura do ponto mais quente da matriz de silício (`junction` / Hotspot). |
 | `power_watts` | Float \| null | Flutuante (W) | Consumo elétrico instantâneo em Watts reportado pelo sensor do regulador. |
+| `power_cap_watts` | Float \| null | Flutuante (W) | Limite máximo de potência elétrica configurado para o pacote/placa (`power1_cap` ou fallback `power1_cap_default`). |
 
 *Regra de Robustez:* Sempre que um sensor não estiver disponível no hardware ou a versão do driver não expuser o arquivo correspondente, o valor será retornado como `null` literal. Com o módulo presente e sem GPU identificada, `card` e os sensores também são `null`. Com o módulo ausente, `status` retorna erro e `telemetry` continua disponível.
+
+#### Classificação de Hardware (APU vs. dGPU)
+
+A CLI identifica o tipo de dispositivo combinando uma tabela estática de PCI IDs conhecidos com uma heurística baseada em múltiplos sinais do sysfs/hwmon:
+1. **Tabela Estática:** Dispositivos catalogados (famílias Raven, Renoir, Cezanne, Van Gogh, Rembrandt, Raphael, Phoenix, Hawk Point, Strix Point, Polaris, Vega, RDNA 1/2/3/4) são mapeados diretamente para seu modelo, tipo e flag `is_apu`.
+2. **Heurística de Múltiplos Sinais (PCI ID não catalogado):**
+   - **Sinais fortes de dGPU:** Presença de sensor de temperatura de memória VRAM (`mem`/`vram`), presença de controle de ventoinha (`pwm1` ou `fan1_input`), teto de potência `power_cap_watts > 95 W`, ou alocação onde `vram_total_mib > gtt_total_mib`.
+   - **Sinais de APU (na ausência de sinais fortes de dGPU):** Memória unificada compartilhada (`vram_total_mib <= 8192 MiB` com `gtt_total_mib > vram_total_mib`) sem sensores de `junction`/`mem` nem ventoinha, ou `power_cap_watts <= 65 W` com `gtt_total_mib >= vram_total_mib`.
 
 ---
 

@@ -21,6 +21,7 @@ struct GpuTelemetry {
     std::optional<double> temp_edge_c;       // °C
     std::optional<double> temp_junction_c;   // °C (Hotspot)
     std::optional<double> power_watts;       // W
+    std::optional<double> power_cap_watts;   // W (Power limit/cap)
     std::optional<int> sclk_mhz;             // SCLK clock in MHz
 };
 

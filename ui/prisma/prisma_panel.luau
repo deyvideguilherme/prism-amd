@@ -56,7 +56,9 @@ local function performanceView()
 
     local isApu = (telem.is_apu == true) or (telem.gpu_type == "APU")
     local powerW = if type(telem.power_watts) == "number" then math.floor(telem.power_watts + 0.5) else 0
-    local powerMaxW = if isApu then 65 else 300
+    local powerMaxW = if type(telem.power_cap_watts) == "number" and telem.power_cap_watts > 0
+        then math.max(1, math.floor(telem.power_cap_watts + 0.5))
+        else (if isApu then 65 else 300)
 
     local vramUsed = if type(telem.vram_used_mib) == "number" then telem.vram_used_mib else 0
     local vramTotal = if type(telem.vram_total_mib) == "number" and telem.vram_total_mib > 0 then telem.vram_total_mib else 1
