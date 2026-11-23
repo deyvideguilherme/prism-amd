@@ -71,7 +71,7 @@ Não presuma o comportamento do hardware ou do Kernel. Identifique a causa do pr
 
 O projeto possui três camadas principais, cada uma com suas próprias regras.
 
-### 3.1. Kernel (`kernel/chroma_amd.c`)
+### 3.1. Kernel (módulo `kernel/`)
 
 - **Estabilidade:** Bugs no Kernel podem travar ou derrubar a máquina do usuário. Toda alteração deve considerar os riscos de concorrência, interrupções e acesso ao hardware.
 
@@ -197,7 +197,7 @@ Utilize as ferramentas apropriadas antes de assumir uma causa para o problema.
 Divida o trabalho entre agentes especializados, de acordo com a camada afetada.
 
 - **Kernel e DRM**
-  - Escopo: `kernel/chroma_amd.c`, Kprobes, atomic commits, tratamento de `-EBUSY` e `-EINVAL`, Kbuild, DKMS e udev.
+  - Escopo: `kernel/` (`chroma_main.c`, `chroma_ctm.c`, `chroma_drm.c`, `chroma_iface.c`), Kprobes, atomic commits, tratamento de `-EBUSY` e `-EINVAL`, Kbuild, DKMS e udev.
   - Modelo sugerido: modelo com alto raciocínio técnico.
   - Foco: concorrência, segurança em contexto atômico e estabilidade do sistema operacional.
 

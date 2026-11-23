@@ -61,17 +61,19 @@ if(PRISMA_BUILD_LEGACY_DRM)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(DRM REQUIRED IMPORTED_TARGET libdrm)
 
-    add_library(chroma_drm SHARED src/drm_hook.cpp src/drm_ctm.cpp)
+    add_library(chroma_drm SHARED legacy/drm_hook.cpp legacy/drm_ctm.cpp)
+    target_include_directories(chroma_drm PRIVATE legacy)
     target_link_libraries(chroma_drm PRIVATE PkgConfig::DRM ${CMAKE_DL_LIBS})
 
     if(BUILD_TESTING)
-        add_executable(test_ctm tests/test_ctm.cpp src/drm_ctm.cpp)
-        target_include_directories(test_ctm PRIVATE src)
+        add_executable(test_ctm tests/test_ctm.cpp legacy/drm_ctm.cpp)
+        target_include_directories(test_ctm PRIVATE legacy)
         target_link_libraries(test_ctm PRIVATE PkgConfig::DRM)
         target_compile_options(test_ctm PRIVATE -UNDEBUG)
         add_test(NAME test_ctm COMMAND test_ctm)
 
         add_executable(test_vkms_ctm EXCLUDE_FROM_ALL tests/test_vkms_ctm.cpp)
+        target_include_directories(test_vkms_ctm PRIVATE legacy)
         target_link_libraries(test_vkms_ctm PRIVATE PkgConfig::DRM)
     endif()
 
@@ -92,7 +94,7 @@ if(PRISMA_BUILD_LEGACY_VULKAN)
     find_path(VULKAN_INCLUDE_DIR vulkan/vulkan.h REQUIRED)
     find_program(GLSLANG_VALIDATOR NAMES glslangValidator)
     find_program(GLSLC NAMES glslc)
-    set(SHADER_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/shader.comp")
+    set(SHADER_SRC "${CMAKE_CURRENT_SOURCE_DIR}/legacy/shader.comp")
     set(SHADER_SPV "${CMAKE_CURRENT_BINARY_DIR}/shader.spv")
     set(SHADER_H "${CMAKE_CURRENT_BINARY_DIR}/shader_spv.h")
     set(BIN2C "${CMAKE_CURRENT_SOURCE_DIR}/cmake/bin2c.cmake")
@@ -118,12 +120,12 @@ if(PRISMA_BUILD_LEGACY_VULKAN)
         VERBATIM
     )
     add_custom_target(compile_shaders DEPENDS "${SHADER_SPV}" "${SHADER_H}")
-    add_library(VkLayer_chroma SHARED src/layer.cpp "${SHADER_H}")
+    add_library(VkLayer_chroma SHARED legacy/layer.cpp "${SHADER_H}")
     add_dependencies(VkLayer_chroma compile_shaders)
-    target_include_directories(VkLayer_chroma PRIVATE "${VULKAN_INCLUDE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
+    target_include_directories(VkLayer_chroma PRIVATE "${VULKAN_INCLUDE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}" legacy)
 
     set(CHROMA_LAYER_PATH "${LOCAL_LIB_DIR}/libVkLayer_chroma.so")
-    configure_file(VkLayer_chroma.json.in VkLayer_chroma.json @ONLY)
+    configure_file(legacy/VkLayer_chroma.json.in VkLayer_chroma.json @ONLY)
     add_custom_target(install-legacy-vulkan
         COMMAND ${CMAKE_COMMAND} -E make_directory "${LOCAL_LIB_DIR}" "${LOCAL_LAYER_DIR}"
         COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:VkLayer_chroma>" "${CHROMA_LAYER_PATH}"

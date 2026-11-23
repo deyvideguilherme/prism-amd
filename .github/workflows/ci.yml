@@ -60,7 +60,12 @@ jobs:
           bsdtar -tf "$archive" > /tmp/package-files
           grep -Fx usr/bin/prisma-ctl /tmp/package-files
           grep -Fx usr/lib/udev/rules.d/70-chroma-amd.rules /tmp/package-files
-          grep -E '^usr/src/chroma-amd-[^/]+/chroma_amd.c$' /tmp/package-files
+          grep -E '^usr/src/chroma-amd-[^/]+/chroma_main.c$' /tmp/package-files
+          grep -E '^usr/src/chroma-amd-[^/]+/chroma_ctm.c$' /tmp/package-files
+          grep -E '^usr/src/chroma-amd-[^/]+/chroma_drm.c$' /tmp/package-files
+          grep -E '^usr/src/chroma-amd-[^/]+/chroma_iface.c$' /tmp/package-files
+          grep -E '^usr/src/chroma-amd-[^/]+/chroma_internal.h$' /tmp/package-files
+          grep -E '^usr/src/chroma-amd-[^/]+/prisma_abi.h$' /tmp/package-files
           grep -Fx usr/share/prisma-control-center/ui/prisma/plugin.toml /tmp/package-files
 
   kernel:
