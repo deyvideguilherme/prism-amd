@@ -30,29 +30,19 @@ u64 to_s31_32(s64 num, u64 den)
 }
 
 /*
- * Computes the 3x3 Rec.709 CTM matrix incorporating saturation, contrast,
- * and linear brightness gain using strictly 64-bit integer arithmetic.
- *
- * Brightness (-100 to 100) is applied as a proportional linear gain factor:
- * - brightness = -100 -> gain_q16 = 16384  (0.25x)
- * - brightness =    0 -> gain_q16 = 65536  (1.00x)
- * - brightness = +100 -> gain_q16 = 114688 (1.75x)
- * Formula: gain_q16 = 65536 + div_s64(brightness * 49152, 100)
+ * Computes the 3x3 Rec.709 CTM matrix incorporating exclusively saturation (0..400)
+ * in DRM S31.32 fixed-point using strictly 64-bit integer arithmetic (zero FPU).
  */
-void chroma_compute_ctm(struct drm_color_ctm *ctm, int sat_val, int con_val, int bri_val)
+void chroma_compute_ctm(struct drm_color_ctm *ctm, int sat_val)
 {
 	s64 sat = (s64)sat_val;
-	s64 contrast = (s64)con_val;
-	s64 brightness = (s64)bri_val;
 	s64 one_minus_s = 100LL - sat;
 	s64 weights[3] = { REC709_RW, REC709_GW, REC709_BW };
-	s64 gain_q16;
-	s64 den = 100000000LL * 65536LL; /* 100 (sat) * 10000 (luma) * 100 (contrast) * 65536 (gain_q16) */
+	s64 den = 100LL * 10000LL; /* 100 (sat) * 10000 (Rec.709 weights) = 1,000,000 */
 	int r, c;
 
-	gain_q16 = 65536LL + div_s64(brightness * 49152LL, 100LL);
-	if (gain_q16 < 0)
-		gain_q16 = 0;
+	if (!ctm)
+		return;
 
 	for (r = 0; r < 3; ++r) {
 		for (c = 0; c < 3; ++c) {
@@ -60,11 +50,9 @@ void chroma_compute_ctm(struct drm_color_ctm *ctm, int sat_val, int con_val, int
 			s64 val;
 
 			if (r == c)
-				val = (one_minus_s * w + sat * 10000LL) * contrast;
+				val = one_minus_s * w + sat * 10000LL;
 			else
-				val = (one_minus_s * w) * contrast;
-
-			val = val * gain_q16;
+				val = one_minus_s * w;
 
 			ctm->matrix[r * 3 + c] = to_s31_32(val, den);
 		}
@@ -89,5 +77,74 @@ bool chroma_is_identity_ctm(const struct drm_color_ctm *ctm)
 				return false;
 		}
 	}
+	return true;
+}
+
+/*
+ * Computes a 1D DRM GAMMA_LUT incorporating contrast (10..300) with a pivot
+ * at mid-gray (0.5) and brightness (-100..100) as a linear offset limited to +/-50%
+ * using strictly 64-bit integer arithmetic (zero FPU).
+ */
+void chroma_compute_gamma_lut(struct drm_color_lut *lut, size_t size, int con_val, int bri_val)
+{
+	s64 D;
+	s64 den;
+	size_t i;
+
+	if (!lut || size < 2)
+		return;
+
+	D = (s64)(size - 1);
+	den = 200LL * D;
+
+	for (i = 0; i < size; ++i) {
+		s64 num = (2LL * (s64)i - D) * (s64)con_val + (100LL + (s64)bri_val) * D;
+		u16 val;
+
+		if (num <= 0) {
+			val = 0;
+		} else if (num >= den) {
+			val = 65535;
+		} else {
+			u64 tmp = (u64)num * 65535ULL + (u64)den / 2ULL;
+			val = (u16)div64_u64(tmp, (u64)den);
+		}
+
+		lut[i].red = val;
+		lut[i].green = val;
+		lut[i].blue = val;
+		lut[i].reserved = 0;
+	}
+}
+
+/*
+ * Validates whether a given GAMMA_LUT is an identity ramp (neutral curve).
+ * Allows +/-1 tolerance per color channel to accommodate integer rounding
+ * differences across drivers and compositors. Returns false if any channel
+ * deviates by >1 (e.g. Night Light, wlsunset, ICC curves).
+ */
+bool chroma_is_identity_gamma_lut(const struct drm_color_lut *lut, size_t count)
+{
+	s64 D;
+	size_t i;
+
+	if (!lut || count < 2)
+		return true;
+
+	D = (s64)(count - 1);
+
+	for (i = 0; i < count; ++i) {
+		u64 tmp = (u64)i * 65535ULL + (u64)D / 2ULL;
+		u16 expected = (u16)div64_u64(tmp, (u64)D);
+		int diff_r = (int)lut[i].red - (int)expected;
+		int diff_g = (int)lut[i].green - (int)expected;
+		int diff_b = (int)lut[i].blue - (int)expected;
+
+		if (diff_r < -1 || diff_r > 1 ||
+		    diff_g < -1 || diff_g > 1 ||
+		    diff_b < -1 || diff_b > 1)
+			return false;
+	}
+
 	return true;
 }

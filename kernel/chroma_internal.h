@@ -10,6 +10,7 @@
 #include <linux/kprobes.h>
 #include <linux/math64.h>
 #include <linux/miscdevice.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/pci.h>
@@ -55,12 +56,17 @@ enum chroma_enqueue_result {
 	CHROMA_ENQUEUE_INVALID,
 };
 
+struct chroma_crtc_owned {
+	struct drm_property_blob *ctm;
+	struct drm_property_blob *gamma_lut;
+};
+
 struct chroma_gpu {
 	struct list_head link;
 	struct drm_device *dev;
 	struct module *owner;
 	unsigned int num_crtcs;
-	struct drm_property_blob *owned[];
+	struct chroma_crtc_owned owned[];
 };
 
 /* --- Global State & Synchronization (defined in chroma_main.c) --- */
@@ -86,16 +92,21 @@ void chroma_schedule(void);
 void chroma_pause(void);
 struct prisma_ioctl_state chroma_snapshot(void);
 
-/* --- CTM Computations (chroma_ctm.c) --- */
+/* --- CTM & GAMMA_LUT Computations (chroma_ctm.c) --- */
 u64 to_s31_32(s64 num, u64 den);
-void chroma_compute_ctm(struct drm_color_ctm *ctm, int sat_val, int con_val, int bri_val);
+void chroma_compute_ctm(struct drm_color_ctm *ctm, int sat_val);
 bool chroma_is_identity_ctm(const struct drm_color_ctm *ctm);
+void chroma_compute_gamma_lut(struct drm_color_lut *lut, size_t size, int con_val, int bri_val);
+bool chroma_is_identity_gamma_lut(const struct drm_color_lut *lut, size_t count);
 
 /* --- DRM & GPU Operations (chroma_drm.c) --- */
 int chroma_observe(struct kprobe *probe, struct pt_regs *regs);
 void chroma_scan_pci(void);
 void chroma_collect_gpus(void);
-int chroma_update_gpu(struct chroma_gpu *gpu, const struct drm_color_ctm *target, bool *had_ebusy);
+int chroma_update_gpu(struct chroma_gpu *gpu,
+		      const struct drm_color_ctm *target_ctm,
+		      int con_val, int bri_val, bool need_gamma,
+		      bool *had_ebusy);
 void chroma_forget_gpu(struct chroma_gpu *gpu);
 void chroma_put_gpu(struct drm_device *dev, struct module *owner);
 enum chroma_enqueue_result chroma_try_enqueue_locked(struct drm_device *dev);

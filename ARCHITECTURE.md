@@ -17,20 +17,22 @@ flowchart TD
     Compositor -->|"Commit DRM do compositor"| Observer["Kprobe de descoberta AMDGPU"]
     Observer -->|"Referência ao dispositivo"| Worker["Fila ordenada do Prisma"]
     Config -->|"Cópia dos parâmetros"| Worker
-    Worker -->|"Novo commit validado por DRM/AMDGPU"| CRTC["CTM por CRTC elegível"]
+    Worker -->|"Novo commit validado por DRM/AMDGPU"| CRTC["CTM e GAMMA_LUT por CRTC elegível"]
 ```
 
 ### 1.1. Camada de kernel
 
 O subsistema de kernel (`kernel/chroma_amd.ko`) é responsável pela aplicação atômica da calibração de cor em hardware via DRM/KMS e pelo rastreamento seguro de placas AMDGPU:
 - **Descoberta Híbrida de GPUs:** Combina uma varredura PCI ativa e proativa (`chroma_scan_pci`), executada no carregamento do módulo (`insmod`) e sempre que a lista de GPUs estiver vazia, com um `kprobe` no ponto de commit do DRM (`drm_atomic_helper_commit`). A varredura PCI itera adaptadores com `PCI_VENDOR_ID_ATI` e classe `PCI_BASE_CLASS_DISPLAY`, obtém o `struct drm_device` via `pci_get_drvdata(pdev)` sob `device_lock`, valida o registro do driver `"amdgpu"` e enfileira o dispositivo com retenção de referências do DRM (`drm_dev_get`) e do módulo (`try_module_get`). O `kprobe` é estritamente livre de `printk` para preservar contextos INT3/NMI e kernels PREEMPT_RT.
-- **Preservação Inteligente de CTM Externa vs. Matriz Identidade:** Ao avaliar os CRTCs elegíveis com suporte à propriedade `ctm`, o módulo inspeciona os 9 coeficientes em ponto fixo DRM S31.32 (`chroma_is_identity_ctm`). No formato DRM sinal-magnitude, o módulo valida se a diagonal contém `1ULL << 32` e se os elementos fora da diagonal são estritamente nulos (`(val & ~(1ULL << 63)) == 0ULL`, tratando corretamente `-0.0` com bit de sinal). Se o CRTC estiver sem CTM ou possuir a matriz identidade padrão aplicada pelo compositor Wayland (Smithay/Niri), o Prisma assume o CRTC (`adopting CRTC`). Se o compositor tiver aplicado uma matriz externa de cor ativa (como Night Light / ICC), o Prisma cede o CRTC e não interfere.
-- **Fallback Automático de Modeset para DCN 2.x:** Em hardware AMD DCN 2.1 (ex.: APUs Cezanne/Vega), o driver `amdgpu_dm` exige `allow_modeset = true` durante a transição inicial de vinculação (`!*owned`) ou remoção (`!target`) da matriz CTM para recalcular blocos de cor DPP/MPC, rejeitando o fast path com `-EINVAL`. O módulo tenta primeiramente o fast path `state->allow_modeset = false` (evitando flicker em ajustes contínuos de slider) e, se receber `-EINVAL` durante uma transição, efetua uma nova tentativa atômica controlada com `state->allow_modeset = true`.
+- **Separação do Pipeline de Cor (CTM + GAMMA_LUT):** O DRM/KMS organiza o pipeline de cor sequencialmente em `DEGAMMA_LUT` → `CTM` → `GAMMA_LUT`. O Prisma dedica a matriz CTM (3x3) exclusivamente ao controle de **Saturação Rec.709** (`0..400`) e a tabela 1D `GAMMA_LUT` ao controle de **Contraste** (`10..300`, com pivô central no cinza médio 0.5) e **Brilho** (offset linear limitado a `±50%`). Ambas as propriedades são calculadas em aritmética inteira de 64 bits sem ponto flutuante (zero FPU).
+- **Rastreamento Independente e Coexistência com Night Light:** Cada CRTC possui rastreamento independente para CTM e GAMMA_LUT (`struct chroma_crtc_owned`). O módulo inspeciona independentemente a CTM (`chroma_is_identity_ctm`) e a GAMMA_LUT (`chroma_is_identity_gamma_lut` com tolerância `±1` em R/G/B). Caso uma propriedade contenha calibragem externa ativa (como Night Light / wlsunset / ICC na GAMMA_LUT), o Prisma cede exclusivamente a propriedade conflitante e continua gerenciando a outra (permitindo saturação calibrada concomitantemente com Night Light ativo). Se a propriedade externa retornar à identidade, o Prisma retoma o controle no próximo ciclo.
+- **Suporte Dinâmico a 4096 Entradas e Alocação Segura:** O tamanho da tabela GAMMA_LUT é lido dinamicamente da propriedade atômica `gamma_lut_size_property` (4096 entradas nos DCNs modernos da AMDGPU, evitando o limite legado de 256 de `crtc->gamma_size`). O buffer de 32 KiB é alocado dinamicamente fora da pilha do kernel via `kvmalloc_array` / `kvfree`.
+- **Fallback Automático de Modeset para DCN 2.x:** Em hardware AMD DCN 2.1 (ex.: APUs Cezanne/Vega), o driver `amdgpu_dm` exige `allow_modeset = true` durante a transição inicial de vinculação (`!*owned`) ou remoção (`!target`) de CTM e GAMMA_LUT para recalcular blocos de cor DPP/MPC, rejeitando o fast path com `-EINVAL`. O módulo tenta primeiramente o fast path `state->allow_modeset = false` (evitando flicker em ajustes contínuos de slider) e, se receber `-EINVAL` durante uma transição, efetua uma nova tentativa atômica controlada com `state->allow_modeset = true`.
 - **Tratamento de Contenção `-EBUSY`:** Caso o commit atômico conflite com um pageflip em andamento do compositor retornando `-EBUSY`, a fila ordenada reagenda a execução de forma assíncrona com limite seguro (`CHROMA_MAX_BUSY_RETRIES = 5`) para evitar perda de comando e loops infinitos.
 
 O dispositivo de caractere usa ABI v1 com leitura textual, `GET_ABI`, `GET_STATE` e `SET_STATE`. Escritas textuais parciais preservam os campos omitidos e são validadas integralmente sob o mutex de configuração. As leituras por ioctl recebem uma única cópia coerente. Sysfs expõe os campos individuais em modo de leitura em `/sys/kernel/chroma_amd/`.
 
-Ao desativar ou usar parâmetros neutros, o workqueue restaura bypass somente nos CRTCs em que a referência instalada ainda é a CTM atual. Quando detecta outro blob, libera a referência antiga. Um timer agenda a reavaliação dos dispositivos conhecidos a cada dois segundos para lidar com mudanças de propriedade, atividade da saída, falhas transitórias e remoção. `drm_dev_enter()` protege as operações durante remoção do AMDGPU. A fila pausa antes da suspensão e retoma após o evento de PM. O descarregamento retira a sonda, sincroniza o IRQ work, cancela a fila, restaura as saídas para bypass e libera as referências.
+Ao desativar ou usar parâmetros neutros, o workqueue restaura bypass somente nos CRTCs em que a referência instalada ainda é a propriedade atual. Quando detecta outro blob, libera a referência antiga. Um timer agenda a reavaliação dos dispositivos conhecidos a cada dois segundos para lidar com mudanças de propriedade, atividade da saída, falhas transitórias e remoção. `drm_dev_enter()` protege as operações durante remoção do AMDGPU. A fila pausa antes da suspensão e retoma após o evento de PM. O descarregamento retira a sonda, sincroniza o IRQ work, cancela a fila, restaura as saídas para bypass e libera as referências.
 
 ### 1.2. Camada 2: Userspace CLI & Telemetria (`src/cli/`)
 
@@ -63,10 +65,10 @@ Interface gráfica oficial integrada ao Noctalia Shell no compositor Niri:
 | Arquivo / Diretório | Responsabilidade Única |
 | :--- | :--- |
 | `kernel/chroma_main.c` | Ponto de entrada do módulo de kernel (`module_init`/`module_exit`), estado/configuração global, workqueue, timer de rechecagem e PM suspend/resume notifier. |
-| `kernel/chroma_ctm.c` | Cálculo da matriz CTM Rec.709 (saturação, contraste, brilho), conversão em ponto fixo DRM S31.32 e detecção de matriz identidade. |
+| `kernel/chroma_ctm.c` | Cálculo da matriz CTM Rec.709 (saturação) e da tabela 1D GAMMA_LUT (contraste e brilho), conversão em ponto fixo DRM S31.32 e detecção de matriz identidade e curva de gama neutra. |
 | `kernel/chroma_drm.c` | Varredura PCI proativa, fila de descoberta, hook Kprobe em `drm_atomic_helper_commit`, commits atômicos DRM/KMS e ciclo de vida de GPUs. |
 | `kernel/chroma_iface.c` | Dispositivo de caractere `/dev/chroma_amd` (`read`/`write`/`ioctl`), parser textual de configuração e atributos sysfs em `/sys/kernel/chroma_amd/`. |
-| `kernel/chroma_internal.h` | Cabeçalho interno com definições de estruturas (`chroma_gpu`), sincronização e protótipos compartilhados do módulo. |
+| `kernel/chroma_internal.h` | Cabeçalho interno com definições de estruturas (`chroma_gpu`, `chroma_crtc_owned`), sincronização e protótipos compartilhados do módulo. |
 | `kernel/Makefile` | Automação de compilação Kbuild (`chroma_amd.ko` a partir dos 4 objetos modulares), detecção de `LLVM=1`, carga e descarga. |
 | `kernel/70-chroma-amd.rules` | Regra devtmpfs atribuindo o dispositivo `/dev/chroma_amd` ao grupo `video` com permissões `0660`. |
 | `kernel/dkms.conf` | Metadados do DKMS para compilação automática do módulo a cada atualização do kernel Linux. |
@@ -76,6 +78,7 @@ Interface gráfica oficial integrada ao Noctalia Shell no compositor Niri:
 | `src/cli/main.cpp` | Ponto de entrada do executável `prisma-ctl`, despachando `status`, `set`, `telemetry`, `profile`, `doctor` e as opções de versão e ajuda. |
 | `legacy/` | Componentes históricos opcionais: hook DRM via `LD_PRELOAD` (`drm_hook.cpp`, `drm_ctm.cpp`), camada Vulkan (`layer.cpp`, `shader.comp`), manifesto e exemplo de configuração. |
 | `tests/test_ctm.cpp` | Testes unitários de validação matemática do ponto fixo S31.32 e saturação Rec.709. |
+| `tests/test_color_math.cpp` | Testes unitários de validação matemática do ponto fixo S31.32, CTM, GAMMA_LUT, pivô de contraste, brilho e tolerância/rejeição de Night Light. |
 | `tests/test_cli.cpp` | Testes unitários do parser de dispositivo, validação de limites, telemetria mockada e gerenciador de perfis. |
 | `ui/prisma/plugin.toml` | Manifesto do plugin oficial para Noctalia Shell. |
 | `ui/prisma/prisma_service.luau` | Daemon de integração Luau para consulta de status e despacho de comandos. |

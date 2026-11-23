@@ -87,19 +87,17 @@ O projeto possui três camadas principais, cada uma com suas próprias regras.
 
   Utilize `drm_dev_enter/exit` para proteger o acesso ao ciclo de vida do dispositivo, evitando operações durante desconexão ou remoção do hardware. Respeite também os mecanismos de sincronização e locking do DRM/KMS.
 
-- **Preservação de CTM externa:** O pipeline de gerenciamento de cores do DRM/KMS possui três propriedades sequenciais:
+- **Preservação de CTM e GAMMA_LUT externas:** O pipeline de gerenciamento de cores do DRM/KMS possui três propriedades sequenciais:
 
   `DEGAMMA_LUT` → `CTM` → `GAMMA_LUT`
 
-  A matriz CTM fica posicionada entre as duas LUTs. O módulo inspeciona os coeficientes em ponto fixo DRM S31.32 da propriedade `ctm`, utilizando `chroma_is_identity_ctm`.
+  A matriz CTM (3x3) fica posicionada entre as duas LUTs. O Prisma dedica a CTM estritamente à saturação Rec.709 e a GAMMA_LUT 1D ao contraste (com pivô no cinza médio 0.5) e brilho (offset linear limitado a ±50%).
 
-  Se o CRTC estiver sem CTM ou utilizar uma matriz identidade, o Prisma poderá assumir o controle. Se houver uma CTM externa não identidade, o Prisma deve ceder o CRTC e não interferir.
+  O módulo inspeciona independentemente os coeficientes CTM (`chroma_is_identity_ctm`) e as entradas da GAMMA_LUT (`chroma_is_identity_gamma_lut` com tolerância ±1).
 
-  - **Outras transformações de cor:** Não considere que todas as transformações externas, como Night Light e perfis ICC gerenciados pelo compositor Wayland, utilizam exclusivamente a CTM. Compositores e gerenciadores de cor também podem utilizar `DEGAMMA_LUT` ou `GAMMA_LUT`.
+  Se uma propriedade estiver ausente ou contiver valores de identidade, o Prisma assume o controle dela. Se houver uma propriedade externa não identidade (como Night Light / wlsunset / perfil ICC na GAMMA_LUT), o Prisma cede exclusivamente a propriedade conflitante e continua gerenciando a outra (permitindo, por exemplo, saturação calibrada concomitantemente com Night Light ativo).
 
-    O código atual detecta especificamente a matriz CTM. Caso seja necessário preservar todas as transformações externas, investigue e trate as propriedades de LUT separadamente. Não presuma que a detecção atual já cobre esses casos.
-
-- **Tratamento de erros:** Trate `-EINVAL` na transição de CTM em DCN 2.x com nova tentativa de commit atômico utilizando `allow_modeset = true`.
+- **Tratamento de erros:** Trate `-EINVAL` na transição de CTM ou GAMMA_LUT em DCN 2.x com nova tentativa de commit atômico utilizando `allow_modeset = true`.
 
   Trate `-EBUSY`, causado por conflitos como pageflip em andamento do compositor, reagendando a operação de forma assíncrona até o limite de `CHROMA_MAX_BUSY_RETRIES = 5`.
 
@@ -235,6 +233,7 @@ Execute os testes de acordo com os componentes modificados.
 |---|---|---|
 | **Kernel / Comportamento do driver** | Teste de integração em QEMU e validação física quando disponível | `tests/run-kernel-vm.sh`, Kernel Linux alvo e BusyBox estático |
 | **Contrato ABI do Kernel** | `test_kernel_abi` (structs, offsets e ioctls da ABI v1) | Binário C++ compilado via CMake |
+| **Matemática CTM / GAMMA_LUT** | `test_color_math` (CTM, GAMMA_LUT, rampa identidade, pivô e tolerância Night Light) | CTest |
 | **CLI / Telemetria** | `test_cli` (limites numéricos, descritores POSIX, perfis e mocks) | CTest |
 | **Interface Noctalia Shell** | `check_ui` (manifesto, sintaxe Luau e cinco cenários comportamentais) | `python3 tests/check_ui.py` |
 | **Matemática CTM Rec.709** | `test_ctm` (cálculo matricial e conversão S31.32) | `build-legacy/`, na CI dedicada |

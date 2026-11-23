@@ -37,6 +37,10 @@ if(BUILD_TESTING)
     target_compile_options(test_cli PRIVATE -UNDEBUG)
     add_test(NAME test_cli COMMAND test_cli)
 
+    add_executable(test_color_math tests/test_color_math.cpp)
+    target_compile_options(test_color_math PRIVATE -UNDEBUG)
+    add_test(NAME test_color_math COMMAND test_color_math)
+
     add_executable(test_kernel_abi EXCLUDE_FROM_ALL tests/test_kernel_abi.cpp)
     target_include_directories(test_kernel_abi PRIVATE kernel)
     target_link_libraries(test_kernel_abi PRIVATE Threads::Threads)
