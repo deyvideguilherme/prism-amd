@@ -9,9 +9,18 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <cstddef>
 #include <unistd.h>
 
 namespace {
+
+static_assert(PRISMA_ABI_VERSION == 1, "ABI v1 version must remain 1");
+static_assert(sizeof(prisma_ioctl_state) == 20, "ABI v1 struct size must remain exactly 20 bytes");
+static_assert(offsetof(prisma_ioctl_state, abi_version) == 0, "abi_version offset must be 0");
+static_assert(offsetof(prisma_ioctl_state, enabled) == 4, "enabled offset must be 4");
+static_assert(offsetof(prisma_ioctl_state, saturation) == 8, "saturation offset must be 8");
+static_assert(offsetof(prisma_ioctl_state, contrast) == 12, "contrast offset must be 12");
+static_assert(offsetof(prisma_ioctl_state, brightness) == 16, "brightness offset must be 16");
 
 void require(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));

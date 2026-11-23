@@ -52,6 +52,11 @@ test "$(cat /sys/kernel/chroma_amd/brightness)" = -20
 prisma-ctl profile save gaming
 prisma-ctl set --enabled 0
 test "$(cat /sys/kernel/chroma_amd/enabled)" = 0
+prisma-ctl set --enabled 1
+test "$(cat /sys/kernel/chroma_amd/enabled)" = 1
+test "$(cat /sys/kernel/chroma_amd/saturation)" = 165
+prisma-ctl set --enabled 0
+test "$(cat /sys/kernel/chroma_amd/enabled)" = 0
 prisma-ctl profile apply gaming
 prisma-ctl profile list | grep -F '[sat=165, con=115, bri=-20, en=1]'
 test "$(cat /sys/kernel/chroma_amd/enabled)" = 1
