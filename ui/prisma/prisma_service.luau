@@ -62,6 +62,14 @@ local pendingState = {
     brightness = 0,
 }
 
+local function tr(key, fallback)
+    if type(noctalia.tr) == "function" then
+        local ok, text = pcall(noctalia.tr, key)
+        if ok and type(text) == "string" and text ~= "" and text ~= key then return text end
+    end
+    return fallback
+end
+
 local function log(msg)
     noctalia.log(`prisma_service: {msg}`)
 end
@@ -197,14 +205,14 @@ local function pollStatus(onComplete)
                 lastErrorMessage = ""
             else
                 isAvailable = false
-                lastErrorMessage = "Falha ao decodificar JSON de telemetria"
+                lastErrorMessage = tr("errors.telemetry", "Falha ao decodificar JSON de telemetria")
             end
         else
             isAvailable = false
             if type(result.stderr) == "string" and result.stderr ~= "" then
                 lastErrorMessage = noctalia.string.trim(result.stderr)
             else
-                lastErrorMessage = "Módulo chroma_amd não carregado ou permissão negada"
+                lastErrorMessage = tr("errors.offline", "Módulo chroma_amd não carregado ou permissão negada")
             end
         end
 
@@ -213,21 +221,35 @@ local function pollStatus(onComplete)
     end)
 end
 
+local function isIntegerInRange(value, low, high)
+    return type(value) == "number" and value >= low and value <= high and value == math.floor(value)
+end
+
+local profilesRequest = 0
 local function refreshProfiles()
-    noctalia.runAsync("prisma-ctl profile list", function(result)
+    profilesRequest += 1
+    local request = profilesRequest
+    noctalia.runAsync("prisma-ctl profile list --json", function(result)
+        if request ~= profilesRequest or result.exitCode ~= 0 or type(result.stdout) ~= "string" then return end
+        -- Empty JSON objects and arrays both decode to empty Luau tables.
+        if not result.stdout:match("^%s*%[") then return end
+        local ok, profiles = pcall(noctalia.json.decode, result.stdout)
+        if not ok or type(profiles) ~= "table" then return end
+
         local list = {}
-        if result.exitCode == 0 and type(result.stdout) == "string" then
-            for line in result.stdout:gmatch("[^\r\n]+") do
-                local name, sat, con, bri, en = line:match("^%s*%-%s*([%w%-_]+)%s*%[sat=(%d+),%s*con=(%d+),%s*bri=([%-%d]+),%s*en=(%d+)%]")
-                if name then
-                    table.insert(list, {
-                        name = name,
-                        saturation = tonumber(sat) or 100,
-                        contrast = tonumber(con) or 100,
-                        brightness = tonumber(bri) or 0,
-                        enabled = tonumber(en) or 1,
-                    })
-                end
+        for _, profile in ipairs(profiles) do
+            if type(profile) == "table" and type(profile.name) == "string" and profile.name ~= ""
+                and isIntegerInRange(profile.saturation, 0, 400)
+                and isIntegerInRange(profile.contrast, 10, 300)
+                and isIntegerInRange(profile.brightness, -100, 100)
+                and isIntegerInRange(profile.enabled, 0, 1) then
+                table.insert(list, {
+                    name = profile.name,
+                    saturation = profile.saturation,
+                    contrast = profile.contrast,
+                    brightness = profile.brightness,
+                    enabled = profile.enabled,
+                })
             end
         end
         savedProfiles = list
@@ -244,7 +266,7 @@ local function flushSetCommand()
     if not isDeviceAvailable then
         isDirty = false
         mutationErrorSeq += 1
-        lastErrorMessage = "Módulo chroma_amd não disponível para gravação"
+        lastErrorMessage = tr("errors.write", "Módulo chroma_amd não disponível para gravação")
         publishStatus()
         return
     end
@@ -274,7 +296,7 @@ local function flushSetCommand()
             pendingState.contrast = deviceState.contrast
             pendingState.brightness = deviceState.brightness
             pendingState.enabled = deviceState.enabled
-            lastErrorMessage = noctalia.string.trim(result.stderr or result.stdout or "Falha ao aplicar parâmetros")
+            lastErrorMessage = noctalia.string.trim(result.stderr or result.stdout or tr("errors.set", "Falha ao aplicar parâmetros"))
             log(`Erro ao aplicar comando set: {lastErrorMessage}`)
         end
         publishStatus()
@@ -325,7 +347,7 @@ local function handleCommand(cmd)
                     lastErrorMessage = ""
                     refreshProfiles()
                 else
-                    lastErrorMessage = noctalia.string.trim(result.stderr or "Falha ao salvar perfil")
+                    lastErrorMessage = noctalia.string.trim(result.stderr or tr("errors.save", "Falha ao salvar perfil"))
                     publishStatus()
                 end
             end)
@@ -339,7 +361,7 @@ local function handleCommand(cmd)
                     lastErrorMessage = ""
                     pollStatus()
                 else
-                    lastErrorMessage = noctalia.string.trim(result.stderr or "Falha ao aplicar perfil")
+                    lastErrorMessage = noctalia.string.trim(result.stderr or tr("errors.apply", "Falha ao aplicar perfil"))
                     publishStatus()
                 end
             end)
@@ -353,7 +375,7 @@ local function handleCommand(cmd)
                     lastErrorMessage = ""
                     refreshProfiles()
                 else
-                    lastErrorMessage = noctalia.string.trim(result.stderr or "Falha ao excluir perfil")
+                    lastErrorMessage = noctalia.string.trim(result.stderr or tr("errors.delete", "Falha ao excluir perfil"))
                     publishStatus()
                 end
             end)
@@ -365,7 +387,7 @@ local function handleCommand(cmd)
                 lastErrorMessage = ""
                 pollStatus()
             else
-                lastErrorMessage = noctalia.string.trim(result.stderr or "Falha ao resetar parâmetros")
+                lastErrorMessage = noctalia.string.trim(result.stderr or tr("errors.reset", "Falha ao resetar parâmetros"))
                 publishStatus()
             end
         end)

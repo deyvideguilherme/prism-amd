@@ -1,5 +1,6 @@
 #include "profiles.hpp"
 #include "file_descriptor.hpp"
+#include "telemetry.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -8,6 +9,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <locale>
 #include <memory>
 #include <sstream>
 #include <sys/stat.h>
@@ -32,6 +34,24 @@ std::string profile_filename(std::string_view name) {
         throw std::invalid_argument("Invalid profile name");
     }
     return std::string(name) + std::string(profile_extension);
+}
+
+// Linux filenames may contain bytes that cannot represent a JSON string.
+bool is_utf8(std::string_view name) {
+    for (size_t i = 0; i < name.size();) {
+        const unsigned char lead = name[i++];
+        if (lead < 0x80) continue;
+        if (lead < 0xc2 || lead > 0xf4) return false;
+        const size_t tails = lead < 0xe0 ? 1 : (lead < 0xf0 ? 2 : 3);
+        if (name.size() - i < tails) return false;
+        const unsigned char second = name[i];
+        if ((lead == 0xe0 && second < 0xa0) || (lead == 0xed && second >= 0xa0) ||
+            (lead == 0xf0 && second < 0x90) || (lead == 0xf4 && second >= 0x90)) return false;
+        for (size_t end = i + tails; i < end; ++i) {
+            if ((name[i] & 0xc0) != 0x80) return false;
+        }
+    }
+    return true;
 }
 
 FileDescriptor open_profile_directory(const std::filesystem::path& dir, bool create = false) {
@@ -259,6 +279,25 @@ std::vector<Profile> list_profiles(const std::filesystem::path& dir) {
 
     std::ranges::sort(list, {}, &Profile::name);
     return list;
+}
+
+std::string format_profiles_json(const std::vector<Profile>& profiles) {
+    std::ostringstream out;
+    out.imbue(std::locale::classic());
+    out << '[';
+    bool first = true;
+    for (const auto& profile : profiles) {
+        if (!is_utf8(profile.name)) continue;
+        if (!first) out << ", ";
+        first = false;
+        out << "{\"name\": " << json_string(profile.name)
+            << ", \"saturation\": " << profile.state.saturation
+            << ", \"contrast\": " << profile.state.contrast
+            << ", \"brightness\": " << profile.state.brightness
+            << ", \"enabled\": " << profile.state.enabled << '}';
+    }
+    out << ']';
+    return out.str();
 }
 
 bool delete_profile(const std::string& name, const std::filesystem::path& dir) {

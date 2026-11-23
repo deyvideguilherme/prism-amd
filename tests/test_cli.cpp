@@ -8,8 +8,12 @@
 #include <fstream>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
+#include <iterator>
 #include <thread>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 using namespace prisma;
 
@@ -301,6 +305,45 @@ void test_telemetry_parser() {
     std::cout << "  [PASS] Test 2: SCLK & Mocked Sysfs/HWMON Telemetry Parser passed.\n";
 }
 
+void test_profile_list_output() {
+    TemporaryDirectory fixture;
+    const auto profiles = fixture.path / "prisma" / "profiles";
+    const auto output = fixture.path / "stdout";
+    const auto cli = std::filesystem::canonical("/proc/self/exe").parent_path() / "prisma-ctl";
+    std::cout.flush();
+    const auto list = [&](bool json) {
+        const pid_t child = ::fork();
+        assert(child >= 0);
+        if (child == 0) {
+            if (!std::freopen(output.c_str(), "w", stdout) ||
+                ::setenv("XDG_CONFIG_HOME", fixture.path.c_str(), 1) != 0) {
+                ::_exit(1);
+            }
+            ::execl(cli.c_str(), "prisma-ctl", "profile", "list", json ? "--json" : nullptr,
+                    static_cast<const char*>(nullptr));
+            ::_exit(1);
+        }
+        int status;
+        assert(::waitpid(child, &status, 0) == child);
+        assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        std::ifstream stream(output);
+        return std::string(std::istreambuf_iterator<char>(stream), {});
+    };
+
+    assert(list(false) == "No saved profiles found in " + profiles.string() + "\n");
+    assert(list(true) == "[]\n");
+    save_profile("jogos", {160, 115, 10, 1}, profiles);
+    save_profile("Ciné \"HDR\"", {120, 105, -5, 0}, profiles);
+    assert(list(false) == "Saved profiles (" + profiles.string() + "):\n"
+           "  - Ciné \"HDR\"      [sat=120, con=105, bri=-5, en=0]\n"
+           "  - jogos            [sat=160, con=115, bri=10, en=1]\n");
+    save_profile("invalid-\xff", {}, profiles);
+    assert(list(true) ==
+           R"([{"name": "Ciné \"HDR\"", "saturation": 120, "contrast": 105, "brightness": -5, "enabled": 0}, )"
+           R"({"name": "jogos", "saturation": 160, "contrast": 115, "brightness": 10, "enabled": 1}])"
+           "\n");
+}
+
 void test_profiles_manager() {
     std::cout << "[test_cli] Running Test 3: Profile Serialization & Management...\n";
 
@@ -584,6 +627,7 @@ int main() {
     test_device_parser();
     test_telemetry_parser();
     test_profiles_manager();
+    test_profile_list_output();
     test_power_cap_and_apu_heuristics();
     std::cout << "All CLI unit tests PASSED successfully!\n";
     return 0;

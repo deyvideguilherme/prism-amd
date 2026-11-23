@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 
 repo_root = Path(__file__).resolve().parents[1]
@@ -18,16 +20,30 @@ for component in ("service", "widget", "panel"):
         script = plugin / entry["entry"]
         assert script.parent == plugin and script.is_file(), script
 
-for translation in sorted((plugin / "translations").glob("*.json")):
-    messages = json.loads(translation.read_text())
-    for setting in manifest["setting"]:
-        keys = [setting["label_key"], setting["description_key"]]
-        keys.extend(choice["label_key"] for choice in setting.get("options", ()))
-        for key in keys:
-            value = messages
-            for part in key.split("."):
-                value = value[part]
-            assert isinstance(value, str) and value, (translation, key)
+
+def translation_keys(messages, prefix=""):
+    keys = set()
+    for key, value in messages.items():
+        path = f"{prefix}{key}"
+        if isinstance(value, dict):
+            keys.update(translation_keys(value, path + "."))
+        else:
+            assert isinstance(value, str) and value.strip(), path
+            keys.add(path)
+    return keys
+
+
+catalogs = {lang: (plugin / "translations" / f"{lang}.json").read_text() for lang in ("en", "pt-BR")}
+english, portuguese = (translation_keys(json.loads(content)) for content in catalogs.values())
+assert english == portuguese, f"Translation keys differ: {sorted(english ^ portuguese)}"
+
+required_keys = set()
+for setting in manifest["setting"]:
+    required_keys.update((setting["label_key"], setting["description_key"]))
+    required_keys.update(choice["label_key"] for choice in setting.get("options", ()))
+for script in plugin.glob("*.luau"):
+    required_keys.update(re.findall(r'\btr\(\s*"([^"]+)"', script.read_text()))
+assert required_keys <= english, f"Missing translations: {sorted(required_keys - english)}"
 
 print("Noctalia manifest, entry points and translations validated")
 
@@ -36,8 +52,9 @@ if luau_bin:
     test_script = repo_root / "tests/test_ui.luau"
     assert test_script.is_file(), f"Test script missing: {test_script}"
 
-    sources_module = repo_root / "tests/ui_sources.luau"
-    try:
+    with tempfile.TemporaryDirectory(prefix="prisma-ui-") as temp:
+        test_script = Path(shutil.copy(test_script, temp))
+        sources_module = Path(temp) / "ui_sources.luau"
         service_text = (plugin / "prisma_service.luau").read_text()
         widget_text = (plugin / "prisma_widget.luau").read_text()
         panel_text = (plugin / "prisma_panel.luau").read_text()
@@ -46,15 +63,14 @@ if luau_bin:
             f"    service = [==[{service_text}]==],\n"
             f"    widget = [==[{widget_text}]==],\n"
             f"    panel = [==[{panel_text}]==],\n"
-            "}\n"
+            "    translations = {\n"
+            + "".join(f'        ["{lang}"] = [==[{content}]==],\n' for lang, content in catalogs.items())
+            + "    },\n}\n"
         )
         sources_module.write_text(sources_content)
 
         print(f"Running Luau UI behavioral test suite using {luau_bin}...")
         subprocess.run([luau_bin, str(test_script)], cwd=repo_root, check=True)
-    finally:
-        if sources_module.exists():
-            sources_module.unlink()
 elif os.environ.get("LUAU_REQUIRE_VM") == "1":
     print("Erro: LUAU_REQUIRE_VM=1 definido, mas binário 'luau' não foi encontrado em LUAU_BIN ou PATH", file=sys.stderr)
     sys.exit(1)

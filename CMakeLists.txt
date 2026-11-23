@@ -33,6 +33,7 @@ if(BUILD_TESTING)
 
     find_package(Threads REQUIRED)
     add_executable(test_cli tests/test_cli.cpp)
+    add_dependencies(test_cli prisma-ctl)
     target_link_libraries(test_cli PRIVATE prisma_cli Threads::Threads)
     target_compile_options(test_cli PRIVATE -UNDEBUG)
     add_test(NAME test_cli COMMAND test_cli)

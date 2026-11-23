@@ -8,6 +8,19 @@ local hideInactive = noctalia.getConfig("hide_inactive")
 
 local currentStatus = nil
 
+local function tr(key, fallback, subst)
+    if type(noctalia.tr) == "function" then
+        local ok, value = pcall(noctalia.tr, key, subst)
+        if ok and type(value) == "string" and value ~= "" and value ~= key then
+            return value
+        end
+    end
+    if subst then
+        return (fallback:gsub("{(%w+)}", function(name) return tostring(subst[name]) end))
+    end
+    return fallback
+end
+
 local function updateDisplay()
     barMetric = noctalia.getConfig("bar_metric")
     hideInactive = noctalia.getConfig("hide_inactive")
@@ -17,7 +30,8 @@ local function updateDisplay()
         barWidget.setGlyph("palette")
         barWidget.setGlyphColor("on_surface_variant")
         barWidget.setText("")
-        barWidget.setTooltip("Prisma Control Center\nHardware não disponível ou módulo não carregado")
+        barWidget.setTooltip(tr("name", "Prisma Control Center") .. "\n"
+            .. tr("widget.offline", "Hardware não disponível ou módulo não carregado"))
         barWidget.setVisible(not hideInactive)
         return
     end
@@ -60,9 +74,14 @@ local function updateDisplay()
     local con = if type(dev.contrast) == "number" then dev.contrast else 100
     local bri = if type(dev.brightness) == "number" then dev.brightness else 0
 
-    local tooltip = `Prisma Control Center\n`
-        .. `GPU: {gpuBusy}% | {if hasHotspot then "Hotspot" else "Borda"}: {primaryTempRounded}°C | Consumo: {powerW}W\n`
-        .. `Saturação: {sat}% | Contraste: {con}% | Brilho: {bri}%`
+    local sensor = if hasHotspot then tr("widget.hotspot", "Hotspot") else tr("widget.edge", "Borda")
+    local sensors = tr("widget.sensors", "GPU: {load}% | {sensor}: {temperature}°C | Consumo: {power}W", {
+        load = gpuBusy, sensor = sensor, temperature = primaryTempRounded, power = powerW,
+    })
+    local colors = tr("color.summary", "Saturação: {sat}% | Contraste: {con}% | Brilho: {bri}%", {
+        sat = sat, con = con, bri = bri,
+    })
+    local tooltip = tr("name", "Prisma Control Center") .. "\n" .. sensors .. "\n" .. colors
 
     barWidget.setTooltip(tooltip)
     barWidget.setVisible(true)

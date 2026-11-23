@@ -30,6 +30,8 @@ DeviceState load_profile(const std::string& name, const std::filesystem::path& d
 // Lists all saved profiles in the directory
 std::vector<Profile> list_profiles(const std::filesystem::path& dir = get_profiles_directory());
 
+std::string format_profiles_json(const std::vector<Profile>& profiles);
+
 // Deletes a profile from disk
 bool delete_profile(const std::string& name, const std::filesystem::path& dir = get_profiles_directory());
 

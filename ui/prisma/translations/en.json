@@ -15,5 +15,83 @@
       "label": "Hide when inactive",
       "description": "Hide the bar widget when the chroma_amd module is not loaded"
     }
+  },
+  "panel": {
+    "performance": {
+      "load": "GPU LOAD",
+      "activity": "Graphics processing activity",
+      "edge_only": "Single sensor (Edge)",
+      "hotspot_description": "Maximum internal GPU temperature (Hotspot)",
+      "apu_temperature": "APU package temperature (Edge)",
+      "gpu_temperature": "GPU temperature (Edge)",
+      "temperature": "TEMPERATURE",
+      "package_power": "APU package power (PPT)",
+      "board_power": "Board power",
+      "power": "POWER CONSUMPTION",
+      "vram": "VRAM",
+      "unified_memory": "GRAPHICS MEMORY (VRAM + GTT)",
+      "active": "Hardware Active",
+      "offline": "Offline",
+      "edge": "Edge: {temperature}°C",
+      "power_cap": "Limit: {power} W",
+      "allocated": "{memory} MiB allocated"
+    },
+    "color": {
+      "title": "Hardware Color Calibration",
+      "unavailable": "Kernel device /dev/chroma_amd not found. Calibration unavailable.",
+      "description": "Adjust saturation, contrast and brightness at the graphics output",
+      "offline": "Module Offline",
+      "enabled": "Calibration: ON",
+      "disabled": "Calibration: OFF",
+      "saturation": "Saturation",
+      "saturation_description": "Color intensity and vibrancy on screen (0..400%)",
+      "contrast": "Contrast",
+      "contrast_description": "Difference between light and dark tones (10..300%)",
+      "brightness": "Brightness",
+      "brightness_description": "Overall image brightness (-100..100%)",
+      "presets": "QUICK PRESETS",
+      "standard": "Standard",
+      "competitive": "Competitive",
+      "cinema": "Cinema",
+      "mono": "Mono",
+      "restore": "Restore default ({value}%)"
+    },
+    "profiles": {
+      "save_current": "SAVE CURRENT STATE",
+      "placeholder": "Profile name (e.g. games, movies)",
+      "save": "Save",
+      "empty": "No saved profiles yet",
+      "active": "Active",
+      "apply": "Apply",
+      "saved": "SAVED PROFILES",
+      "reload": "Reload List",
+      "restore": "Restore Defaults",
+      "delete": "Delete profile '{name}'"
+    },
+    "close": "Close",
+    "tabs": {
+      "performance": "Performance",
+      "color": "Display & Color",
+      "profiles": "Profiles"
+    }
+  },
+  "color": {
+    "summary": "Saturation: {sat}% | Contrast: {con}% | Brightness: {bri}%"
+  },
+  "widget": {
+    "offline": "Hardware unavailable or module not loaded",
+    "sensors": "GPU: {load}% | {sensor}: {temperature}°C | Power: {power}W",
+    "edge": "Edge",
+    "hotspot": "Hotspot"
+  },
+  "errors": {
+    "telemetry": "Failed to decode telemetry JSON",
+    "offline": "chroma_amd module unavailable or permission denied",
+    "write": "chroma_amd module unavailable for writing",
+    "set": "Failed to apply parameters",
+    "save": "Failed to save profile",
+    "apply": "Failed to apply profile",
+    "delete": "Failed to delete profile",
+    "reset": "Failed to reset parameters"
   }
 }

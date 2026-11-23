@@ -160,6 +160,14 @@ A CLI identifica o tipo de dispositivo combinando uma tabela estática de PCI ID
    - **Sinais fortes de dGPU:** Presença de sensor de temperatura de memória VRAM (`mem`/`vram`), presença de controle de ventoinha (`pwm1` ou `fan1_input`), teto de potência `power_cap_watts > 95 W`, ou alocação onde `vram_total_mib > gtt_total_mib`.
    - **Sinais de APU (na ausência de sinais fortes de dGPU):** Memória unificada compartilhada (`vram_total_mib <= 8192 MiB` com `gtt_total_mib > vram_total_mib`) sem sensores de `junction`/`mem` nem ventoinha, ou `power_cap_watts <= 65 W` com `gtt_total_mib >= vram_total_mib`.
 
+### 3.2. Perfis salvos
+
+`prisma-ctl profile list --json` escreve em stdout um array ordenado por nome (ordem lexicográfica de bytes), ou `[]` quando vazio. Cada objeto contém o nome do perfil em UTF-8 e os quatro parâmetros inteiros com as faixas do objeto `device`. A listagem JSON omite nomes de arquivo inválidos em UTF-8. A listagem textual padrão continua disponível com `prisma-ctl profile list`.
+
+```json
+[{"name": "jogos", "saturation": 160, "contrast": 115, "brightness": 10, "enabled": 1}]
+```
+
 ---
 
 ## 4. Compilação e testes

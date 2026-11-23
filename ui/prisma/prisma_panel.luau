@@ -19,6 +19,19 @@ local localDevice = {
 local statusData = nil
 local render
 
+local function tr(key, fallback, subst)
+    if type(noctalia.tr) == "function" then
+        local ok, value = pcall(noctalia.tr, key, subst)
+        if ok and type(value) == "string" and value ~= "" and value ~= key then
+            return value
+        end
+    end
+    if subst then
+        return (fallback:gsub("{(%w+)}", function(name) return tostring(subst[name]) end))
+    end
+    return fallback
+end
+
 local function clamp(val, lo, hi)
     return math.max(lo, math.min(hi, val))
 end
@@ -74,12 +87,12 @@ local function performanceView()
     -- 1. GPU Load & SCLK Clock Block
     local gpuBlock = ui.column({ gap = 4, align = "stretch" }, {
         ui.row({ align = "center", justify = "space_between" }, {
-            ui.label({ text = "CARGA DA GPU", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
+            ui.label({ text = tr("panel.performance.load", "CARGA DA GPU"), fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
             ui.label({ text = `{sclkMhz} MHz`, fontSize = 12, color = "on_surface_variant" }),
         }),
         ui.row({ align = "baseline", gap = 6 }, {
             ui.label({ text = `{gpuBusy}%`, fontSize = 22, fontWeight = "bold", color = "primary" }),
-            ui.label({ text = "Atividade de processamento gráfico", fontSize = 11, color = "on_surface_variant" }),
+            ui.label({ text = tr("panel.performance.activity", "Atividade de processamento gráfico"), fontSize = 11, color = "on_surface_variant" }),
         }),
         ui.progress({
             height = 8,
@@ -90,18 +103,21 @@ local function performanceView()
     })
 
     -- 2. Temperatures Block (Hotspot & Edge)
-    local tempRightLabel = if hasHotspot then `Borda: {tempEdge}°C` else "Sensor Único (Borda)"
-    local tempSubtitle = if hasHotspot then
-        "Temperatura interna máxima da GPU (Hotspot)"
-    elseif isApu then
-        "Temperatura do encapsulamento da APU (Edge)"
+    local tempRightLabel = if hasHotspot then
+        tr("panel.performance.edge", "Borda: {temperature}°C", { temperature = tostring(tempEdge) })
     else
-        "Temperatura da GPU (Edge)"
+        tr("panel.performance.edge_only", "Sensor Único (Borda)")
+    local tempSubtitle = if hasHotspot then
+        tr("panel.performance.hotspot_description", "Temperatura interna máxima da GPU (Hotspot)")
+    elseif isApu then
+        tr("panel.performance.apu_temperature", "Temperatura do encapsulamento da APU (Edge)")
+    else
+        tr("panel.performance.gpu_temperature", "Temperatura da GPU (Edge)")
     local tempFill = if mainTemp > tempWarn then "error" else "secondary"
 
     local tempBlock = ui.column({ gap = 4, align = "stretch" }, {
         ui.row({ align = "center", justify = "space_between" }, {
-            ui.label({ text = "TEMPERATURA", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
+            ui.label({ text = tr("panel.performance.temperature", "TEMPERATURA"), fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
             ui.label({ text = tempRightLabel, fontSize = 12, color = "on_surface_variant" }),
         }),
         ui.row({ align = "baseline", gap = 6 }, {
@@ -122,12 +138,18 @@ local function performanceView()
     })
 
     -- 3. Power Consumption Block
-    local powerSubtitle = if isApu then "Potência elétrica do pacote APU (PPT)" else "Potência elétrica da placa"
+    local powerSubtitle = if isApu then
+        tr("panel.performance.package_power", "Potência elétrica do pacote APU (PPT)")
+    else
+        tr("panel.performance.board_power", "Potência elétrica da placa")
 
     local powerBlock = ui.column({ gap = 4, align = "stretch" }, {
         ui.row({ align = "center", justify = "space_between" }, {
-            ui.label({ text = "CONSUMO DE ENERGIA", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
-            ui.label({ text = `Teto: {powerMaxW} W`, fontSize = 12, color = "on_surface_variant" }),
+            ui.label({ text = tr("panel.performance.power", "CONSUMO DE ENERGIA"), fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
+            ui.label({
+                text = tr("panel.performance.power_cap", "Teto: {power} W", { power = tostring(powerMaxW) }),
+                fontSize = 12, color = "on_surface_variant",
+            }),
         }),
         ui.row({ align = "baseline", gap = 6 }, {
             ui.label({ text = `{powerW} W`, fontSize = 22, fontWeight = "bold", color = "on_surface" }),
@@ -142,14 +164,14 @@ local function performanceView()
     })
 
     -- 4. VRAM / Graphics Memory Allocation Block
-    local vramTitle = "MEMÓRIA VRAM"
+    local vramTitle = tr("panel.performance.vram", "MEMÓRIA VRAM")
     local vramRightLabel = `{string.format("%.1f", vramUsed / 1024)} / {string.format("%.1f", vramTotal / 1024)} GiB`
     local vramPercent = `{math.floor(vramRatio * 100 + 0.5)}%`
-    local vramSubtitle = `{math.floor(vramUsed)} MiB alocados`
+    local vramSubtitle = tr("panel.performance.allocated", "{memory} MiB alocados", { memory = tostring(math.floor(vramUsed)) })
     local vramProgressVal = vramRatio
 
     if isApu and gttTotal > 0 then
-        vramTitle = "MEMÓRIA GRÁFICA (VRAM + GTT)"
+        vramTitle = tr("panel.performance.unified_memory", "MEMÓRIA GRÁFICA (VRAM + GTT)")
         local combinedUsed = vramUsed + gttUsed
         local combinedTotal = vramTotal + gttTotal
         local memRatio = clamp(combinedUsed / combinedTotal, 0, 1)
@@ -184,17 +206,22 @@ local function performanceView()
     -- Hardware Identity Footer Row
     local gpuName = if type(telem.gpu_name) == "string" and telem.gpu_name ~= "" then telem.gpu_name else nil
     local cardDisplay = if gpuName then `{card} ({if isApu then "APU" else "dGPU"}) — {gpuName}` else `{card} ({if isApu then "APU" else "dGPU"})`
-    local infoRow = ui.row({ align = "center", justify = "space_between" }, {
-        ui.row({ gap = 12, align = "center" }, {
+    local infoRow = ui.column({ gap = 4, align = "stretch" }, {
+        ui.row({ justify = "space_between", gap = 8, align = "center" }, {
             ui.label({ text = cardDisplay, fontSize = 12, fontWeight = "bold", color = "on_surface" }),
-            ui.label({ text = pciId, fontSize = 12, color = "on_surface_variant" }),
-            ui.label({ text = devId, fontSize = 12, color = "on_surface_variant" }),
+            ui.label({
+                text = if statusData and statusData.available then
+                    tr("panel.performance.active", "Hardware Ativo")
+                else
+                    tr("panel.performance.offline", "Offline"),
+                fontSize = 12,
+                fontWeight = "bold",
+                color = if statusData and statusData.available then "primary" else "error",
+            }),
         }),
-        ui.label({
-            text = if statusData and statusData.available then "Hardware Ativo" else "Offline",
-            fontSize = 12,
-            fontWeight = "bold",
-            color = if statusData and statusData.available then "primary" else "error",
+        ui.row({ gap = 12, align = "center" }, {
+            ui.label({ text = pciId, fontSize = 11, color = "on_surface_variant" }),
+            ui.label({ text = devId, fontSize = 11, color = "on_surface_variant" }),
         }),
     })
 
@@ -236,34 +263,50 @@ local function interactiveBar(value, minVal, maxVal, isEnabled, onSelectValue)
     return ui.row({ gap = 2, align = "center" }, segments)
 end
 
-local function colorView()
-    local isDeviceAvailable = if statusData and statusData.device and statusData.device.available ~= nil then
+local presets = {
+    standard = { saturation = 100, contrast = 100, brightness = 0 },
+    competitive = { saturation = 160, contrast = 115, brightness = 10 },
+    cinema = { saturation = 120, contrast = 105, brightness = -5 },
+    mono = { saturation = 0, contrast = 110, brightness = 0 },
+}
+
+local function matchesColors(settings)
+    return localDevice.saturation == settings.saturation
+        and localDevice.contrast == settings.contrast
+        and localDevice.brightness == settings.brightness
+end
+
+local function deviceAvailable()
+    return if statusData and statusData.device and statusData.device.available ~= nil then
         statusData.device.available == true
     elseif statusData and statusData.device_available ~= nil then
         statusData.device_available == true
     else
         true
+end
 
+local function colorView()
+    local isDeviceAvailable = deviceAvailable()
     local isEnabled = isDeviceAvailable and (localDevice.enabled == 1)
 
     -- 1. Master Enable Toggle Row
     local masterRow = ui.row({ align = "center", justify = "space_between" }, {
         ui.column({ gap = 2, flexGrow = 1 }, {
-            ui.label({ text = "Calibragem de Cor em Hardware", fontSize = 14, fontWeight = "bold" }),
+            ui.label({ text = tr("panel.color.title", "Calibragem de Cor em Hardware"), fontSize = 14, fontWeight = "bold" }),
             ui.label({
                 text = if not isDeviceAvailable then
-                    "Módulo /dev/chroma_amd não encontrado no kernel. Calibragem indisponível."
+                    tr("panel.color.unavailable", "Módulo /dev/chroma_amd não encontrado no kernel. Calibragem indisponível.")
                 else
-                    "Ajusta saturação, contraste e brilho diretamente na saída de vídeo da placa",
+                    tr("panel.color.description", "Ajusta saturação, contraste e brilho diretamente na saída de vídeo da placa"),
                 fontSize = 11,
                 color = if not isDeviceAvailable then "error" else "on_surface_variant",
             }),
         }),
         ui.button({
             text = if not isDeviceAvailable then
-                "Módulo Offline"
+                tr("panel.color.offline", "Módulo Offline")
             else
-                (if isEnabled then "Calibragem: ATIVADA" else "Calibragem: DESATIVADA"),
+                (if isEnabled then tr("panel.color.enabled", "Calibragem: ATIVADA") else tr("panel.color.disabled", "Calibragem: DESATIVADA")),
             glyph = if not isDeviceAvailable then "alert-triangle" else (if isEnabled then "check" else "x"),
             variant = if isDeviceAvailable and isEnabled then "primary" else "outline",
             onClick = if isDeviceAvailable then "onToggleMaster" else nil,
@@ -320,7 +363,7 @@ local function colorView()
                     glyph = "rotate",
                     text = `{defaultVal}%`,
                     variant = "outline",
-                    tooltip = `Restaurar padrão ({defaultVal}%)`,
+                    tooltip = tr("panel.color.restore", "Restaurar padrão ({value}%)", { value = tostring(defaultVal) }),
                     enabled = isEnabled and value ~= defaultVal,
                     onClick = onReset,
                 }),
@@ -337,8 +380,8 @@ local function colorView()
 
     local satBlock = parameterBlock(
         "saturation",
-        "Saturação",
-        "Intensidade e vivacidade das cores na tela (0..400%)",
+        tr("panel.color.saturation", "Saturação"),
+        tr("panel.color.saturation_description", "Intensidade e vivacidade das cores na tela (0..400%)"),
         localDevice.saturation,
         0, 400, 100,
         function(val) localDevice.saturation = clamp(val, 0, 400) end,
@@ -349,8 +392,8 @@ local function colorView()
 
     local conBlock = parameterBlock(
         "contrast",
-        "Contraste",
-        "Diferença entre tons claros e escuros (10..300%)",
+        tr("panel.color.contrast", "Contraste"),
+        tr("panel.color.contrast_description", "Diferença entre tons claros e escuros (10..300%)"),
         localDevice.contrast,
         10, 300, 100,
         function(val) localDevice.contrast = clamp(val, 10, 300) end,
@@ -361,8 +404,8 @@ local function colorView()
 
     local briBlock = parameterBlock(
         "brightness",
-        "Brilho",
-        "Nível geral de luminosidade da imagem (-100..100%)",
+        tr("panel.color.brightness", "Brilho"),
+        tr("panel.color.brightness_description", "Nível geral de luminosidade da imagem (-100..100%)"),
         localDevice.brightness,
         -100, 100, 0,
         function(val) localDevice.brightness = clamp(val, -100, 100) end,
@@ -372,41 +415,23 @@ local function colorView()
     )
 
     -- 3. Presets Rápidos
+    local function presetButton(preset, text, glyph, onClick)
+        return ui.button({
+            text = text,
+            glyph = glyph,
+            variant = if isEnabled and matchesColors(preset) then "primary" else "outline",
+            enabled = isEnabled,
+            onClick = onClick,
+            flexGrow = 1,
+        })
+    end
     local presetsBlock = ui.column({ gap = 8, align = "stretch" }, {
-        ui.label({ text = "PRESETS RÁPIDOS", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
+        ui.label({ text = tr("panel.color.presets", "PRESETS RÁPIDOS"), fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
         ui.row({ gap = 8, align = "center" }, {
-            ui.button({
-                text = "Padrão",
-                glyph = "rotate",
-                variant = "outline",
-                enabled = isEnabled,
-                onClick = "onPresetStandard",
-                flexGrow = 1,
-            }),
-            ui.button({
-                text = "Competitivo",
-                glyph = "device-gamepad-2",
-                variant = "outline",
-                enabled = isEnabled,
-                onClick = "onPresetCompetitive",
-                flexGrow = 1,
-            }),
-            ui.button({
-                text = "Cinema",
-                glyph = "movie",
-                variant = "outline",
-                enabled = isEnabled,
-                onClick = "onPresetCinema",
-                flexGrow = 1,
-            }),
-            ui.button({
-                text = "Mono",
-                glyph = "palette",
-                variant = "outline",
-                enabled = isEnabled,
-                onClick = "onPresetMono",
-                flexGrow = 1,
-            }),
+            presetButton(presets.standard, tr("panel.color.standard", "Padrão"), "rotate", "onPresetStandard"),
+            presetButton(presets.competitive, tr("panel.color.competitive", "Competitivo"), "device-gamepad-2", "onPresetCompetitive"),
+            presetButton(presets.cinema, tr("panel.color.cinema", "Cinema"), "movie", "onPresetCinema"),
+            presetButton(presets.mono, tr("panel.color.mono", "Mono"), "palette", "onPresetMono"),
         }),
     })
 
@@ -426,18 +451,18 @@ local function profilesView()
 
     -- Save Profile Block
     local saveBlock = ui.column({ gap = 8, align = "stretch" }, {
-        ui.label({ text = "SALVAR ESTADO ATUAL", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
+        ui.label({ text = tr("panel.profiles.save_current", "SALVAR ESTADO ATUAL"), fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
         ui.row({ gap = 8, align = "center" }, {
             ui.input({
                 key = "profile_input",
-                placeholder = "Nome do perfil (ex: jogos, filmes)",
+                placeholder = tr("panel.profiles.placeholder", "Nome do perfil (ex: jogos, filmes)"),
                 value = newProfileName,
                 flexGrow = 1,
                 onChange = "onProfileNameChange",
                 onSubmit = "onSaveProfileSubmit",
             }),
             ui.button({
-                text = "Salvar",
+                text = tr("panel.profiles.save", "Salvar"),
                 glyph = "device-floppy",
                 variant = "primary",
                 enabled = (newProfileName ~= ""),
@@ -450,16 +475,18 @@ local function profilesView()
     local profileRows = {}
     if #profiles == 0 then
         table.insert(profileRows, ui.label({
-            text = "Nenhum perfil salvo ainda",
+            text = tr("panel.profiles.empty", "Nenhum perfil salvo ainda"),
             color = "on_surface_variant",
             fontSize = 12,
         }))
     else
         for _, p in ipairs(profiles) do
-            local name = p.name or "perfil"
+            local name = p.name
             local sat = p.saturation or 100
             local con = p.contrast or 100
             local bri = p.brightness or 0
+            local isActive = deviceAvailable() and matchesColors(p)
+                and (p.enabled == nil or localDevice.enabled == p.enabled)
 
             local onApply = function()
                 hasPendingColorUpdate = false
@@ -474,22 +501,25 @@ local function profilesView()
                 ui.column({ gap = 2, flexGrow = 1 }, {
                     ui.label({ text = name, fontSize = 14, fontWeight = "bold" }),
                     ui.label({
-                        text = `Saturação: {sat}% | Contraste: {con}% | Brilho: {bri}%`,
+                        text = tr("color.summary", "Saturação: {sat}% | Contraste: {con}% | Brilho: {bri}%", {
+                            sat = tostring(sat), con = tostring(con), bri = tostring(bri),
+                        }),
                         fontSize = 11,
                         color = "on_surface_variant",
                     }),
                 }),
                 ui.row({ gap = 6, align = "center" }, {
                     ui.button({
-                        text = "Aplicar",
+                        text = if isActive then tr("panel.profiles.active", "Ativo") else tr("panel.profiles.apply", "Aplicar"),
                         glyph = "check",
-                        variant = "primary",
+                        variant = if isActive then "outline" else "primary",
+                        enabled = not isActive,
                         onClick = onApply,
                     }),
                     ui.button({
                         glyph = "trash",
                         variant = "destructive",
-                        tooltip = `Excluir perfil '{name}'`,
+                        tooltip = tr("panel.profiles.delete", "Excluir perfil '{name}'", { name = name }),
                         onClick = onDelete,
                     }),
                 }),
@@ -498,7 +528,7 @@ local function profilesView()
     end
 
     local listBlock = ui.column({ gap = 8, align = "stretch" }, {
-        ui.label({ text = "PERFIS SALVOS", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
+        ui.label({ text = tr("panel.profiles.saved", "PERFIS SALVOS"), fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
         ui.column({ gap = 10, align = "stretch" }, profileRows),
     })
 
@@ -506,12 +536,12 @@ local function profilesView()
     local actionsRow = ui.row({ align = "center", justify = "space_between" }, {
         ui.button({
             glyph = "refresh",
-            text = "Recarregar Lista",
+            text = tr("panel.profiles.reload", "Recarregar Lista"),
             variant = "ghost",
             onClick = "onRefreshProfilesClicked",
         }),
         ui.button({
-            text = "Restaurar Padrões",
+            text = tr("panel.profiles.restore", "Restaurar Padrões"),
             glyph = "rotate",
             variant = "destructive",
             onClick = "onResetDefaultsClicked",
@@ -555,29 +585,29 @@ render = function()
     -- Header row
     local header = ui.row({ align = "center", justify = "space_between" }, {
         ui.row({ gap = 8, align = "center" }, {
-            ui.label({ text = "Prisma Control Center", fontSize = 16, fontWeight = "bold", color = "on_surface" }),
+            ui.label({ text = tr("name", "Prisma Control Center"), fontSize = 16, fontWeight = "bold", color = "on_surface" }),
         }),
-        ui.button({ glyph = "x", variant = "ghost", tooltip = "Fechar", onClick = "onCloseClicked" }),
+        ui.button({ glyph = "x", variant = "ghost", tooltip = tr("panel.close", "Fechar"), onClick = "onCloseClicked" }),
     })
 
     -- Navigation tab buttons
     local nav = ui.row({ gap = 8, align = "center" }, {
         ui.button({
-            text = "Desempenho",
+            text = tr("panel.tabs.performance", "Desempenho"),
             glyph = "chart-line",
             variant = if currentTab == "performance" then "primary" else "ghost",
             onClick = "onTabPerformance",
             flexGrow = 1,
         }),
         ui.button({
-            text = "Tela & Cor",
+            text = tr("panel.tabs.color", "Tela & Cor"),
             glyph = "adjustments",
             variant = if currentTab == "color" then "primary" else "ghost",
             onClick = "onTabColor",
             flexGrow = 1,
         }),
         ui.button({
-            text = "Perfis",
+            text = tr("panel.tabs.profiles", "Perfis"),
             glyph = "palette",
             variant = if currentTab == "profiles" then "primary" else "ghost",
             onClick = "onTabProfiles",
@@ -695,40 +725,29 @@ function onBrightnessReset()
     render()
 end
 
-function onPresetStandard()
-    localDevice.saturation = 100
-    localDevice.contrast = 100
-    localDevice.brightness = 0
+local function applyPreset(preset)
+    localDevice.saturation = preset.saturation
+    localDevice.contrast = preset.contrast
+    localDevice.brightness = preset.brightness
     localDevice.enabled = 1
     sendColorUpdate(true)
     render()
+end
+
+function onPresetStandard()
+    applyPreset(presets.standard)
 end
 
 function onPresetCompetitive()
-    localDevice.saturation = 160
-    localDevice.contrast = 115
-    localDevice.brightness = 10
-    localDevice.enabled = 1
-    sendColorUpdate(true)
-    render()
+    applyPreset(presets.competitive)
 end
 
 function onPresetCinema()
-    localDevice.saturation = 120
-    localDevice.contrast = 105
-    localDevice.brightness = -5
-    localDevice.enabled = 1
-    sendColorUpdate(true)
-    render()
+    applyPreset(presets.cinema)
 end
 
 function onPresetMono()
-    localDevice.saturation = 0
-    localDevice.contrast = 110
-    localDevice.brightness = 0
-    localDevice.enabled = 1
-    sendColorUpdate(true)
-    render()
+    applyPreset(presets.mono)
 end
 
 function onProfileNameChange(text)
