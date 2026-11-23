@@ -57,8 +57,38 @@ end
 
 -- ── Tab 1: Desempenho (Hardware Telemetry) ───────────────────────────────────
 
+local function sparkline(samples, maxVal, fillColor)
+    local bars = {}
+    if type(samples) == "table" and maxVal > 0 then
+        for index = math.max(1, #samples - 29), #samples do
+            local value = samples[index]
+            if type(value) == "number" and value == value then
+                local height = math.clamp(math.round(24 * (value / maxVal)), 2, 24)
+                table.insert(bars, ui.box({ width = 3, height = height, fill = fillColor }))
+            end
+        end
+    end
+    return ui.row({ align = "end", gap = 1, height = 24 }, bars)
+end
+
 local function performanceView()
     local telem = (if statusData and statusData.telemetry then statusData.telemetry else {})
+    local history = (statusData and statusData.history) or {}
+    local peaks = (statusData and statusData.peaks) or {}
+
+    local function peakText(value, unit)
+        return tr("panel.performance.peak", "Pico: {value}", { value = `{math.round(value or 0)}{unit}` })
+    end
+
+    local function historyMeter(current, samples, ceiling, fill)
+        return ui.row({ align = "center", gap = 8 }, {
+            ui.progress({
+                flexGrow = 1, height = 8, radius = 4,
+                progress = clamp(current / ceiling, 0, 1), fill = fill,
+            }),
+            sparkline(samples, ceiling, fill),
+        })
+    end
 
     local gpuBusy = if type(telem.gpu_busy_percent) == "number" then telem.gpu_busy_percent else 0
     local sclkMhz = if type(telem.sclk_mhz) == "number" then telem.sclk_mhz else 0
@@ -91,18 +121,14 @@ local function performanceView()
     local gpuBlock = ui.column({ gap = 4, align = "stretch" }, {
         ui.row({ align = "center", justify = "space_between" }, {
             ui.label({ text = tr("panel.performance.load", "CARGA DA GPU"), fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
-            ui.label({ text = `{sclkMhz} MHz`, fontSize = 12, color = "on_surface_variant" }),
+            ui.label({ text = `{sclkMhz} MHz · {peakText(peaks.sclk_max, " MHz")}`, fontSize = 12, color = "on_surface_variant" }),
         }),
         ui.row({ align = "baseline", gap = 6 }, {
             ui.label({ text = `{gpuBusy}%`, fontSize = 22, fontWeight = "bold", color = "primary" }),
             ui.label({ text = tr("panel.performance.activity", "Atividade de processamento gráfico"), fontSize = 11, color = "on_surface_variant" }),
+            ui.label({ text = peakText(peaks.gpu_busy_max, "%"), fontSize = 11, color = "on_surface_variant" }),
         }),
-        ui.progress({
-            height = 8,
-            radius = 4,
-            progress = clamp(gpuBusy / 100, 0, 1),
-            fill = "primary",
-        }),
+        historyMeter(gpuBusy, history.gpu_busy, 100, "primary"),
     })
 
     -- 2. Temperatures Block (Hotspot & Edge)
@@ -131,13 +157,9 @@ local function performanceView()
                 color = tempFill,
             }),
             ui.label({ text = tempSubtitle, fontSize = 11, color = "on_surface_variant" }),
+            ui.label({ text = peakText(peaks.temp_max, "°C"), fontSize = 11, color = "on_surface_variant" }),
         }),
-        ui.progress({
-            height = 8,
-            radius = 4,
-            progress = clamp(mainTemp / tempCeiling, 0, 1),
-            fill = tempFill,
-        }),
+        historyMeter(mainTemp, history.temp_junction, tempCeiling, tempFill),
     })
 
     -- 3. Power Consumption Block
@@ -157,13 +179,9 @@ local function performanceView()
         ui.row({ align = "baseline", gap = 6 }, {
             ui.label({ text = `{powerW} W`, fontSize = 22, fontWeight = "bold", color = "on_surface" }),
             ui.label({ text = powerSubtitle, fontSize = 11, color = "on_surface_variant" }),
+            ui.label({ text = peakText(peaks.power_max, " W"), fontSize = 11, color = "on_surface_variant" }),
         }),
-        ui.progress({
-            height = 8,
-            radius = 4,
-            progress = clamp(powerW / powerMaxW, 0, 1),
-            fill = "primary",
-        }),
+        historyMeter(powerW, history.power, powerMaxW, "primary"),
     })
 
     -- 4. VRAM / Graphics Memory Allocation Block
@@ -233,6 +251,14 @@ local function performanceView()
         tempBlock,
         powerBlock,
         vramBlock,
+        ui.row({ justify = "end" }, {
+            ui.button({
+                text = tr("panel.performance.reset_peaks", "Resetar picos"),
+                variant = "ghost",
+                controlSize = "sm",
+                onClick = function() sendCommand({ action = "reset_peaks" }) end,
+            }),
+        }),
         infoRow,
     })
 end

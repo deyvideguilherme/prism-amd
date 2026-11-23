@@ -1180,4 +1180,138 @@ do
     assert(not hasLabelWithText(session.tree, warning))
     assert(hasLabelWithText(session.tree, translate("panel.profiles.startup_default")))
 end
+local noRules = [[{"enabled":false,"rules":[]}]]
+
+print("[test_ui] Running telemetry peak and reset tests...")
+do
+    local session = newAutomationSession(noRules, true)
+    local statusCommand = "prisma-ctl status --json"
+    local function sample(json)
+        session.responses[statusCommand] = cliResponse('{"telemetry":' .. json .. '}')
+        session.advance(100)
+    end
+    local function assertPeaks(load, temp, power, clock)
+        local peaks = session.state.status.peaks
+        assert(peaks.gpu_busy_max == load and peaks.temp_max == temp and peaks.power_max == power
+            and peaks.sclk_max == clock, "Unexpected session maxima")
+    end
+
+    assertPeaks(0, 0, 0, 0)
+    sample([[{"gpu_busy_percent":98,"temp_edge_c":54,"temp_junction_c":68.5,"sclk_mhz":2450}]])
+    sample([[{"gpu_busy_percent":12,"temp_edge_c":65,"power_watts":42.5,"sclk_mhz":500}]])
+    assertPeaks(98, 68.5, 42.5, 2450)
+    session.advance(6000)
+    assert(#session.state.status.history.gpu_busy == 60 and session.state.status.history.gpu_busy[1] == 12)
+    assertPeaks(98, 68.5, 42.5, 2450)
+
+    local previousPeak = session.state.status.peaks
+    local polls = session.count(statusCommand)
+    session.send({ action = "reset_peaks" })
+    assertPeaks(0, 0, 0, 0)
+    assert(previousPeak.gpu_busy_max == 98 and session.count(statusCommand) == polls)
+    assert(#session.state.status.history.power == 60 and session.state.status.history.power[60] == 42.5)
+    session.setDevice(true)
+    session.advance(100)
+    assertPeaks(0, 0, 0, 0)
+    sample([[{"gpu_busy_percent":3,"temp_edge_c":40.5,"temp_junction_c":null,"power_watts":null,"sclk_mhz":300}]])
+    assertPeaks(3, 40.5, 0, 300)
+    assert(session.state.status.history.power[60] == 42.5, "Missing sensor must not append a fictitious zero")
+end
+
+print("[test_ui] Running performance chart and peak control tests...")
+do
+    language = "en"
+    local session = newAutomationSession(noRules, true)
+    loadComponent("panel", session.env)
+    local status = table.clone(session.state.status)
+    status.peaks = { gpu_busy_max = 98, temp_max = 68, power_max = 42, sclk_max = 2450 }
+    status.telemetry = { is_apu = true, temp_edge_c = 42, power_cap_watts = 0 }
+    local function charts(load, temp, power)
+        status.history = { gpu_busy = load, temp_junction = temp, power = power }
+        session.env.noctalia.state.set("status", status)
+        local rows = findNodes(session.tree, function(node)
+            return node.type == "row" and node.props.align == "end" and node.props.height == 24
+        end)
+        assert(#rows == 3, "Load, temperature and power must each have a chart")
+        for _, row in ipairs(rows) do
+            for _, bar in ipairs(row.children) do
+                assert(bar.type == "box" and bar.props.height >= 2 and bar.props.height <= 24)
+            end
+        end
+        return rows
+    end
+    for _, row in ipairs(charts({}, {}, {})) do assert(#row.children == 0) end
+    local partial = charts({ -1, 50, 150 }, { 47.5, 95 }, { 32.5, 65 })
+    for i, expected in ipairs({ { 2, 12, 24 }, { 12, 24 }, { 12, 24 } }) do
+        assert(#partial[i].children == #expected)
+        for j, height in ipairs(expected) do assert(partial[i].children[j].props.height == height) end
+    end
+    status.telemetry = { temp_junction_c = 68, power_cap_watts = 200 }
+    local full = table.create(60, 0)
+    for i = 31, 60 do full[i] = 50 end
+    local rows = charts(full, { 55 }, { 100 })
+    assert(#rows[1].children == 30, "Full history must show only the most recent 30 samples")
+    for _, bar in ipairs(rows[1].children) do assert(bar.props.height == 12) end
+    assert(rows[2].children[1].props.height == 12 and rows[3].children[1].props.height == 12)
+    for _, peak in ipairs({ "Peak: 98%", "Peak: 68°C", "Peak: 42 W", "Peak: 2450 MHz" }) do
+        assert(hasLabelWithText(session.tree, peak), peak)
+    end
+    local reset = findNodes(session.tree, function(node)
+        return node.type == "button" and node.props.text == "Reset peaks"
+    end)
+    assert(#reset == 1 and reset[1].props.variant == "ghost")
+    reset[1].props.onClick()
+    assert(session.state.command.action == "reset_peaks" and hasLabelWithText(session.tree, "Peak: 0 W"))
+end
+
+print("[test_ui] Running bar widget state and pointer tests...")
+do
+    language = "en"
+    local session = newAutomationSession(snapshotConfiguration, true)
+    local widgetEnv = { noctalia = session.env.noctalia, barWidget = barWidget }
+    setmetatable(widgetEnv, { __index = getfenv() })
+    local openedPanel
+    widgetEnv.noctalia.togglePanel = function(id) openedPanel = id end
+    loadComponent("widget", widgetEnv)
+    assert(mockBar.glyph == "player-pause" and mockBar.text == "")
+    assert(mockBar.tooltip:find("Calibration: OFF", 1, true))
+    widgetEnv.onRightClick()
+    assert(session.count("prisma-ctl set -s 130 -c 110 -b -8 -e 1") == 1)
+
+    session.responses["prisma-ctl status --json"] = cliResponse([[
+        {"device":{"available":true,"enabled":1,"saturation":160,"contrast":115,"brightness":10},
+         "telemetry":{"card":"card1","gpu_name":"Radeon","temp_junction_c":68,"temp_edge_c":50,
+                      "gpu_busy_percent":98,"power_watts":42}}
+    ]])
+    session.focus(1, "steam_app_730")
+    session.advance(100)
+    assert(mockBar.glyph == "palette" and mockBar.glyphColor == "primary" and mockBar.text == "68°C")
+    for _, text in ipairs({ "Calibration: ON", "Radeon", "GPU: 98%", "Hotspot: 68°C", "Power: 42W",
+        "Saturation: 160%", "Contrast: 115%", "Brightness: 10%", "Niri rule: steam_app_*" }) do
+        assert(mockBar.tooltip:find(text, 1, true), text)
+    end
+    widgetEnv.onClick()
+    assert(openedPanel == "deyvideguilherme/prisma:panel")
+    widgetEnv.onRightClick()
+    assert(session.count("prisma-ctl set -s 160 -c 115 -b 10 -e 0") == 1)
+
+    session.responses["prisma-ctl status --json"] = cliResponse([[
+        {"device":{"available":false},"telemetry":{"card":"card1","temp_edge_c":36,"gpu_busy_percent":0}}
+    ]])
+    session.advance(100)
+    assert(mockBar.glyph == "plug-off" and mockBar.text == "36°C" and mockBar.visible)
+    mockConfig.bar_metric = "gpu_busy"
+    widgetEnv.onConfigChanged()
+    assert(mockBar.text == "0%", "A real zero load remains visible")
+    local count = #session.commands
+    widgetEnv.onRightClick()
+    assert(#session.commands == count, "An offline module must not receive writes")
+    session.setDevice(false)
+    session.advance(100)
+    assert(mockBar.glyph == "plug-off" and mockBar.text == "" and not mockBar.tooltip:find("36°C", 1, true))
+    mockConfig.hide_inactive = true
+    widgetEnv.onConfigChanged()
+    assert(not mockBar.visible)
+    mockConfig.hide_inactive, mockConfig.bar_metric = false, "hotspot"
+end
 print("All Luau UI behavioral tests PASSED successfully!")

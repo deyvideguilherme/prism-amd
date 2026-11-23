@@ -49,7 +49,7 @@ A interface de controle de usuário é construída em C++20 com quatro responsab
 Interface gráfica oficial integrada ao Noctalia Shell no compositor Niri:
 - **`plugin.toml`:** Manifesto do plugin com metadados, configurações do usuário (métrica da barra e ocultação quando inativo), declaração do serviço em background, do widget de barra e do painel flutuante.
 - **`prisma_service.luau`:** Serviço persistente que monitora o estado do hardware, restaura o perfil padrão e consulta o foco do Niri. Consulta o estado do hardware a cada segundo com o painel aberto e a cada cinco segundos em repouso. Aplica um debounce de 50 ms a comandos interativos e publica as alterações de forma otimista enquanto aguarda a confirmação.
-- **`prisma_widget.luau`:** Widget exibido na barra do Noctalia Shell com o ícone de paleta, métrica selecionada (Hotspot, Borda ou Carga) e tooltip com resumo de sensores. Em APUs sem sensor Hotspot (`temp_junction_c`), adota fallback automático para a temperatura de encapsulamento (`temp_edge_c`).
+- **`prisma_widget.luau`** exibe a métrica selecionada (Hotspot, Borda ou Carga) e distingue calibração ativa, pausada e módulo offline pelo ícone. A temperatura principal usa a borda quando o Hotspot está ausente. O tooltip reúne GPU, sensores, calibração e regra Niri ativa. O clique principal abre o painel e o clique direito alterna a calibração quando o dispositivo está disponível e o usuário deixou o gesto livre.
 - **`prisma_panel.luau`:** Central de controle interativa estruturada em 3 abas com imunidade a *snap-back* de sliders:
   - **Desempenho:** Indicadores proporcionais com escala dinâmica inteligente:
     - *APUs (ex.: Ryzen 5 5600GT):* Teto de potência ajustado para 65W (PPT), exibição unificada de memória `VRAM + GTT` (ex.: 512 MiB VRAM + GTT do sistema) e fallback limpo para sensor único de borda.
@@ -194,6 +194,19 @@ O serviço Noctalia aplica o perfil padrão uma vez ao confirmar o acesso ao dis
 O objeto `automation` no estado compartilhado do plugin inclui `enabled`, `default_profile` e `rules`, além de `niri_available`, `active_rule` (o padrão aplicado), `active_app_id` (o identificador da janela sob a regra) e `last_app_id` (o último identificador capturado). Uma falha no IPC do Niri interrompe as consultas em segundo plano. A próxima abertura da aba Perfis pode tentar novamente.
 
 O serviço relê a configuração a cada dez segundos para reconhecer alterações feitas diretamente pela CLI. A aba Perfis atualiza a configuração ao abrir e após alterações feitas pelo painel.
+
+### 3.4. Histórico e picos no estado interno do plugin
+
+No estado compartilhado `status`, cada série de `history` guarda até 60 leituras válidas, da mais antiga para a mais recente. A aba Desempenho desenha as últimas 30 amostras de carga, temperatura e potência. O widget usa os booleanos em `telemetry.sensor_available` para distinguir sensores ausentes de leituras de zero na consulta atual.
+
+| Campo de `status.peaks` | Maior leitura na sessão do serviço |
+|---|---|
+| `gpu_busy_max` | Carga da GPU (%) |
+| `temp_max` | Temperatura principal (°C), Hotspot quando disponível ou borda |
+| `power_max` | Potência (W) |
+| `sclk_max` | Frequência do clock gráfico (MHz) |
+
+Os quatro máximos começam em zero e persistem quando a amostra sai do histórico. O comando interno `{ action = "reset_peaks" }` publica os máximos zerados imediatamente e preserva o histórico. A próxima leitura válida inicia a nova contagem para o sensor correspondente.
 
 ---
 
