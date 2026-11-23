@@ -15,5 +15,83 @@
       "label": "Ocultar se inativo",
       "description": "Ocultar o widget da barra quando o hardware não estiver disponível"
     }
+  },
+  "panel": {
+    "performance": {
+      "load": "CARGA DA GPU",
+      "activity": "Atividade de processamento gráfico",
+      "edge_only": "Sensor Único (Borda)",
+      "hotspot_description": "Temperatura interna máxima da GPU (Hotspot)",
+      "apu_temperature": "Temperatura do encapsulamento da APU (Edge)",
+      "gpu_temperature": "Temperatura da GPU (Edge)",
+      "temperature": "TEMPERATURA",
+      "package_power": "Potência elétrica do pacote APU (PPT)",
+      "board_power": "Potência elétrica da placa",
+      "power": "CONSUMO DE ENERGIA",
+      "vram": "MEMÓRIA VRAM",
+      "unified_memory": "MEMÓRIA GRÁFICA (VRAM + GTT)",
+      "active": "Hardware Ativo",
+      "offline": "Offline",
+      "edge": "Borda: {temperature}°C",
+      "power_cap": "Teto: {power} W",
+      "allocated": "{memory} MiB alocados"
+    },
+    "color": {
+      "title": "Calibragem de Cor em Hardware",
+      "unavailable": "Módulo /dev/chroma_amd não encontrado no kernel. Calibragem indisponível.",
+      "description": "Ajusta saturação, contraste e brilho diretamente na saída de vídeo da placa",
+      "offline": "Módulo Offline",
+      "enabled": "Calibragem: ATIVADA",
+      "disabled": "Calibragem: DESATIVADA",
+      "saturation": "Saturação",
+      "saturation_description": "Intensidade e vivacidade das cores na tela (0..400%)",
+      "contrast": "Contraste",
+      "contrast_description": "Diferença entre tons claros e escuros (10..300%)",
+      "brightness": "Brilho",
+      "brightness_description": "Nível geral de luminosidade da imagem (-100..100%)",
+      "presets": "PRESETS RÁPIDOS",
+      "standard": "Padrão",
+      "competitive": "Competitivo",
+      "cinema": "Cinema",
+      "mono": "Mono",
+      "restore": "Restaurar padrão ({value}%)"
+    },
+    "profiles": {
+      "save_current": "SALVAR ESTADO ATUAL",
+      "placeholder": "Nome do perfil (ex: jogos, filmes)",
+      "save": "Salvar",
+      "empty": "Nenhum perfil salvo ainda",
+      "active": "Ativo",
+      "apply": "Aplicar",
+      "saved": "PERFIS SALVOS",
+      "reload": "Recarregar Lista",
+      "restore": "Restaurar Padrões",
+      "delete": "Excluir perfil '{name}'"
+    },
+    "close": "Fechar",
+    "tabs": {
+      "performance": "Desempenho",
+      "color": "Tela & Cor",
+      "profiles": "Perfis"
+    }
+  },
+  "color": {
+    "summary": "Saturação: {sat}% | Contraste: {con}% | Brilho: {bri}%"
+  },
+  "widget": {
+    "offline": "Hardware não disponível ou módulo não carregado",
+    "sensors": "GPU: {load}% | {sensor}: {temperature}°C | Consumo: {power}W",
+    "edge": "Borda",
+    "hotspot": "Hotspot"
+  },
+  "errors": {
+    "telemetry": "Falha ao decodificar JSON de telemetria",
+    "offline": "Módulo chroma_amd não carregado ou permissão negada",
+    "write": "Módulo chroma_amd não disponível para gravação",
+    "set": "Falha ao aplicar parâmetros",
+    "save": "Falha ao salvar perfil",
+    "apply": "Falha ao aplicar perfil",
+    "delete": "Falha ao excluir perfil",
+    "reset": "Falha ao resetar parâmetros"
   }
 }

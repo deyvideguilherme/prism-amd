@@ -30,7 +30,7 @@ void print_help(const char* prog) {
               << "Profile Actions:\n"
               << "  save <name>                 Save current parameters to ~/.config/prisma/profiles/<name>.conf\n"
               << "  apply <name>                Load and apply parameters from profile\n"
-              << "  list                        List all saved profiles\n"
+              << "  list [--json]               List all saved profiles\n"
               << "  delete <name>               Delete a saved profile\n"
               << "  reset                       Reset parameters to default (sat=100 con=100 bri=0 en=1)\n\n"
               << "Examples:\n"
@@ -207,7 +207,9 @@ int handle_profile(int argc, char* argv[]) {
     try {
         if (action == "list") {
             auto profiles = prisma::list_profiles();
-            if (profiles.empty()) {
+            if (argc >= 4 && std::string_view(argv[3]) == "--json") {
+                std::cout << prisma::format_profiles_json(profiles) << '\n';
+            } else if (profiles.empty()) {
                 std::cout << "No saved profiles found in " << prisma::get_profiles_directory().string() << "\n";
             } else {
                 std::cout << "Saved profiles (" << prisma::get_profiles_directory().string() << "):\n";

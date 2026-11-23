@@ -178,1294 +178,9 @@ local function decodeJson(str: string)
     return result
 end
 
--- Source loader:
--- 1. Try require("./ui_sources") dynamically provided by check_ui.py
--- 2. Try io.open if io library is available
--- 3. Fallback to embedded sources
-local sources = nil
-local okReq, resReq = pcall(function()
-    return (require :: any)("./ui_sources")
-end)
-if not okReq then
-    okReq, resReq = pcall(function()
-        return (require :: any)("./tests/ui_sources")
-    end)
-end
-if okReq and typeof(resReq) == "table" and resReq.service and resReq.widget and resReq.panel then
-    sources = resReq
-end
-
-if sources == nil and typeof(io) == "table" and typeof(io.open) == "function" then
-    local function readFile(p: string): string?
-        local f = io.open(p, "r") or io.open("ui/prisma/" .. p, "r") or io.open("../ui/prisma/" .. p, "r")
-        if f then
-            local c = f:read("*a")
-            f:close()
-            return c
-        end
-        return nil
-    end
-    local s = readFile("prisma_service.luau")
-    local w = readFile("prisma_widget.luau")
-    local p = readFile("prisma_panel.luau")
-    if s and w and p then
-        sources = { service = s, widget = w, panel = p }
-    end
-end
-
-if sources == nil then
-    sources = {
-        service = [==[--!nonstrict
--- Prisma Control Center - Headless Telemetry & Hardware Service
--- Manages background polling of AMD GPU hardware telemetry and color parameters,
--- maintains historical ring-buffers, debounces mutations, and handles profile management.
-
-noctalia.setUpdateInterval(50)
-
-local TICKS_ACTIVE = 20    -- 20 * 50ms = 1000ms (1s) when panel is open
-local TICKS_IDLE = 100     -- 100 * 50ms = 5000ms (5s) in background
-local DEBOUNCE_TICKS = 1   -- 1 * 50ms = 50ms debounce window for slider adjustments
-local MAX_HISTORY = 60
-
-local tickCount = 0
-local panelOpen = false
-local isPolling = false
-local isMutating = false
-
-local isAvailable = false
-local deviceState = {
-    enabled = 1,
-    saturation = 100,
-    contrast = 100,
-    brightness = 0,
-}
-local telemetryState = {
-    card = "",
-    pci_id = "",
-    device_id = "",
-    is_apu = false,
-    gpu_busy_percent = 0,
-    sclk_mhz = 0,
-    vram_used_mib = 0,
-    vram_total_mib = 0,
-    gtt_used_mib = 0,
-    gtt_total_mib = 0,
-    temp_edge_c = 0,
-    temp_junction_c = 0,
-    power_watts = 0,
-    power_cap_watts = 0,
-}
-
--- Ring-buffers (up to 60 historical samples)
-local historyGpu = {}
-local historyTempJunc = {}
-local historyPower = {}
-local historySclk = {}
-
-local savedProfiles = {}
-local lastErrorMessage = ""
-local mutationErrorSeq = 0
-
--- Debounce tracking
-local isDirty = false
-local dirtyTicks = 0
-local pendingState = {
-    enabled = 1,
-    saturation = 100,
-    contrast = 100,
-    brightness = 0,
-}
-
-local function log(msg)
-    noctalia.log(`prisma_service: {msg}`)
-end
-
-local function clamp(val, lo, hi)
-    return math.max(lo, math.min(hi, val))
-end
-
-local function shellQuote(s)
-    return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
-end
-
-local function appendHistory(buf, val)
-    table.insert(buf, val)
-    if #buf > MAX_HISTORY then
-        table.remove(buf, 1)
-    end
-end
-
-local function publishStatus()
-    local currentDev = if isDirty or isMutating then pendingState else deviceState
-    noctalia.state.set("status", {
-        available = isAvailable,
-        device = {
-            enabled = currentDev.enabled,
-            saturation = currentDev.saturation,
-            contrast = currentDev.contrast,
-            brightness = currentDev.brightness,
-        },
-        telemetry = {
-            card = telemetryState.card,
-            pci_id = telemetryState.pci_id,
-            device_id = telemetryState.device_id,
-            is_apu = telemetryState.is_apu,
-            gpu_busy_percent = telemetryState.gpu_busy_percent,
-            sclk_mhz = telemetryState.sclk_mhz,
-            vram_used_mib = telemetryState.vram_used_mib,
-            vram_total_mib = telemetryState.vram_total_mib,
-            gtt_used_mib = telemetryState.gtt_used_mib,
-            gtt_total_mib = telemetryState.gtt_total_mib,
-            temp_edge_c = telemetryState.temp_edge_c,
-            temp_junction_c = telemetryState.temp_junction_c,
-            power_watts = telemetryState.power_watts,
-            power_cap_watts = telemetryState.power_cap_watts,
-        },
-        history = {
-            gpu_busy = historyGpu,
-            temp_junction = historyTempJunc,
-            power = historyPower,
-            sclk = historySclk,
-        },
-        profiles = savedProfiles,
-        panel_open = panelOpen,
-        error = if lastErrorMessage ~= "" then lastErrorMessage else nil,
-        mutation_error_seq = mutationErrorSeq,
-    })
-end
-
-local function pollStatus(onComplete)
-    if isPolling then return end
-    isPolling = true
-
-    noctalia.runAsync("prisma-ctl status --json", function(result)
-        isPolling = false
-        if result.exitCode == 0 and type(result.stdout) == "string" and result.stdout ~= "" then
-            local ok, parsed = pcall(function()
-                return noctalia.json.decode(result.stdout)
-            end)
-
-            if ok and type(parsed) == "table" then
-                isAvailable = true
-
-                -- Safely parse device state with fallback defaults
-                local dev = parsed.device
-                if type(dev) == "table" then
-                    local hwEnabled = if type(dev.enabled) == "number" then dev.enabled else 1
-                    local hwSat = if type(dev.saturation) == "number" then dev.saturation else 100
-                    local hwCon = if type(dev.contrast) == "number" then dev.contrast else 100
-                    local hwBri = if type(dev.brightness) == "number" then dev.brightness else 0
-
-                    if not isDirty and not isMutating then
-                        deviceState.enabled = hwEnabled
-                        deviceState.saturation = hwSat
-                        deviceState.contrast = hwCon
-                        deviceState.brightness = hwBri
-
-                        pendingState.enabled = hwEnabled
-                        pendingState.saturation = hwSat
-                        pendingState.contrast = hwCon
-                        pendingState.brightness = hwBri
-                    end
-                end
-
-                -- Safely parse hardware telemetry handling nulls
-                local telem = parsed.telemetry
-                if type(telem) == "table" then
-                    telemetryState.card = if type(telem.card) == "string" and telem.card ~= "" then telem.card else "amdgpu"
-                    telemetryState.pci_id = if type(telem.pci_id) == "string" then telem.pci_id else ""
-                    telemetryState.device_id = if type(telem.device_id) == "string" then telem.device_id else ""
-                    telemetryState.is_apu = (telem.is_apu == true)
-                    telemetryState.gpu_busy_percent = if type(telem.gpu_busy_percent) == "number" then telem.gpu_busy_percent else 0
-                    telemetryState.sclk_mhz = if type(telem.sclk_mhz) == "number" then telem.sclk_mhz else 0
-                    telemetryState.vram_used_mib = if type(telem.vram_used_mib) == "number" then telem.vram_used_mib else 0
-                    telemetryState.vram_total_mib = if type(telem.vram_total_mib) == "number" then telem.vram_total_mib else 0
-                    telemetryState.gtt_used_mib = if type(telem.gtt_used_mib) == "number" then telem.gtt_used_mib else 0
-                    telemetryState.gtt_total_mib = if type(telem.gtt_total_mib) == "number" then telem.gtt_total_mib else 0
-                    telemetryState.temp_edge_c = if type(telem.temp_edge_c) == "number" then telem.temp_edge_c else 0
-                    telemetryState.temp_junction_c = if type(telem.temp_junction_c) == "number" then telem.temp_junction_c else 0
-                    telemetryState.power_watts = if type(telem.power_watts) == "number" then telem.power_watts else 0
-                    telemetryState.power_cap_watts = if type(telem.power_cap_watts) == "number" then telem.power_cap_watts else 0
-                end
-
-                local effectiveTemp = if telemetryState.temp_junction_c > 0 then telemetryState.temp_junction_c else telemetryState.temp_edge_c
-
-                appendHistory(historyGpu, telemetryState.gpu_busy_percent)
-                appendHistory(historyTempJunc, effectiveTemp)
-                appendHistory(historyPower, telemetryState.power_watts)
-                appendHistory(historySclk, telemetryState.sclk_mhz)
-
-                lastErrorMessage = ""
-            else
-                isAvailable = false
-                lastErrorMessage = "Falha ao decodificar JSON de telemetria"
-            end
-        else
-            isAvailable = false
-            if type(result.stderr) == "string" and result.stderr ~= "" then
-                lastErrorMessage = noctalia.string.trim(result.stderr)
-            else
-                lastErrorMessage = "Módulo chroma_amd não carregado ou permissão negada"
-            end
-        end
-
-        publishStatus()
-        if onComplete then onComplete() end
-    end)
-end
-
-local function refreshProfiles()
-    noctalia.runAsync("prisma-ctl profile list", function(result)
-        local list = {}
-        if result.exitCode == 0 and type(result.stdout) == "string" then
-            for line in result.stdout:gmatch("[^\r\n]+") do
-                local name, sat, con, bri, en = line:match("^%s*%-%s*([%w%-_]+)%s*%[sat=(%d+),%s*con=(%d+),%s*bri=([%-%d]+),%s*en=(%d+)%]")
-                if name then
-                    table.insert(list, {
-                        name = name,
-                        saturation = tonumber(sat) or 100,
-                        contrast = tonumber(con) or 100,
-                        brightness = tonumber(bri) or 0,
-                        enabled = tonumber(en) or 1,
-                    })
-                end
-            end
-        end
-        savedProfiles = list
-        publishStatus()
-    end)
-end
-
-local function flushSetCommand()
-    if isMutating then
-        isDirty = true
-        dirtyTicks = 0
-        return
-    end
-    if not isDeviceAvailable then
-        isDirty = false
-        mutationErrorSeq += 1
-        lastErrorMessage = "Módulo chroma_amd não disponível para gravação"
-        publishStatus()
-        return
-    end
-    isDirty = false
-    isMutating = true
-
-    local sat = pendingState.saturation
-    local con = pendingState.contrast
-    local bri = pendingState.brightness
-    local en = pendingState.enabled
-
-    publishStatus()
-
-    local cmd = `prisma-ctl set -s {sat} -c {con} -b {bri} -e {en}`
-    noctalia.runAsync(cmd, function(result)
-        isMutating = false
-        if result.exitCode == 0 then
-            deviceState.saturation = sat
-            deviceState.contrast = con
-            deviceState.brightness = bri
-            deviceState.enabled = en
-            lastErrorMessage = ""
-        else
-            mutationErrorSeq += 1
-            isDirty = false
-            pendingState.saturation = deviceState.saturation
-            pendingState.contrast = deviceState.contrast
-            pendingState.brightness = deviceState.brightness
-            pendingState.enabled = deviceState.enabled
-            lastErrorMessage = noctalia.string.trim(result.stderr or result.stdout or "Falha ao aplicar parâmetros")
-            log(`Erro ao aplicar comando set: {lastErrorMessage}`)
-        end
-        publishStatus()
-        if isDirty then
-            flushSetCommand()
-        else
-            pollStatus()
-        end
-    end)
-end
-
-local function handleCommand(cmd)
-    if type(cmd) ~= "table" or type(cmd.action) ~= "string" then return end
-
-    if cmd.action == "set" then
-        if type(cmd.saturation) == "number" then
-            pendingState.saturation = clamp(math.floor(cmd.saturation + 0.5), 0, 400)
-        end
-        if type(cmd.contrast) == "number" then
-            pendingState.contrast = clamp(math.floor(cmd.contrast + 0.5), 10, 300)
-        end
-        if type(cmd.brightness) == "number" then
-            pendingState.brightness = clamp(math.floor(cmd.brightness + 0.5), -100, 100)
-        end
-        if type(cmd.enabled) == "number" then
-            pendingState.enabled = if cmd.enabled ~= 0 then 1 else 0
-        end
-
-        publishStatus()
-
-        if cmd.immediate then
-            if isMutating then
-                isDirty = true
-                dirtyTicks = 0
-            else
-                flushSetCommand()
-            end
-        else
-            isDirty = true
-            dirtyTicks = 0
-        end
-
-    elseif cmd.action == "profile_save" then
-        local name = cmd.name
-        if type(name) == "string" and name ~= "" then
-            noctalia.runAsync(`prisma-ctl profile save {shellQuote(name)}`, function(result)
-                if result.exitCode == 0 then
-                    lastErrorMessage = ""
-                    refreshProfiles()
-                else
-                    lastErrorMessage = noctalia.string.trim(result.stderr or "Falha ao salvar perfil")
-                    publishStatus()
-                end
-            end)
-        end
-
-    elseif cmd.action == "profile_apply" then
-        local name = cmd.name
-        if type(name) == "string" and name ~= "" then
-            noctalia.runAsync(`prisma-ctl profile apply {shellQuote(name)}`, function(result)
-                if result.exitCode == 0 then
-                    lastErrorMessage = ""
-                    pollStatus()
-                else
-                    lastErrorMessage = noctalia.string.trim(result.stderr or "Falha ao aplicar perfil")
-                    publishStatus()
-                end
-            end)
-        end
-
-    elseif cmd.action == "profile_delete" then
-        local name = cmd.name
-        if type(name) == "string" and name ~= "" then
-            noctalia.runAsync(`prisma-ctl profile delete {shellQuote(name)}`, function(result)
-                if result.exitCode == 0 then
-                    lastErrorMessage = ""
-                    refreshProfiles()
-                else
-                    lastErrorMessage = noctalia.string.trim(result.stderr or "Falha ao excluir perfil")
-                    publishStatus()
-                end
-            end)
-        end
-
-    elseif cmd.action == "profile_reset" then
-        noctalia.runAsync("prisma-ctl profile reset", function(result)
-            if result.exitCode == 0 then
-                lastErrorMessage = ""
-                pollStatus()
-            else
-                lastErrorMessage = noctalia.string.trim(result.stderr or "Falha ao resetar parâmetros")
-                publishStatus()
-            end
-        end)
-
-    elseif cmd.action == "profile_list" then
-        refreshProfiles()
-
-    elseif cmd.action == "panel_state" then
-        panelOpen = if cmd.open then true else false
-        if panelOpen then
-            pollStatus()
-            refreshProfiles()
-        end
-    end
-end
-
-function update()
-    tickCount += 1
-
-    -- Debounce processor for rapid slider adjustments
-    if isDirty then
-        dirtyTicks += 1
-        if dirtyTicks >= DEBOUNCE_TICKS then
-            flushSetCommand()
-        end
-    end
-
-    -- Periodic polling interval
-    local interval = if panelOpen then TICKS_ACTIVE else TICKS_IDLE
-    if tickCount % interval == 0 then
-        pollStatus()
-    end
-end
-
--- Listen for commands from the widget or interactive panel
-noctalia.state.watch("command", handleCommand)
-
--- Initial probe and load
-pollStatus(function()
-    refreshProfiles()
-end)
-]==],
-        widget = [==[--!nonstrict
--- Prisma Control Center - Bar Widget Indicator
--- Displays real-time hardware status and selected telemetry metric on the Noctalia bar.
--- Clicking toggles the attached interactive Control Center panel.
-
-local barMetric = noctalia.getConfig("bar_metric")
-local hideInactive = noctalia.getConfig("hide_inactive")
-
-local currentStatus = nil
-
-local function updateDisplay()
-    barMetric = noctalia.getConfig("bar_metric")
-    hideInactive = noctalia.getConfig("hide_inactive")
-
-    local status = currentStatus
-    if type(status) ~= "table" or not status.available then
-        barWidget.setGlyph("palette")
-        barWidget.setGlyphColor("on_surface_variant")
-        barWidget.setText("")
-        barWidget.setTooltip("Prisma Control Center\nHardware não disponível ou módulo não carregado")
-        barWidget.setVisible(not hideInactive)
-        return
-    end
-
-    local dev = status.device or {}
-    local telem = status.telemetry or {}
-
-    local isEnabled = (dev.enabled == 1)
-    if isEnabled then
-        barWidget.setGlyph("palette")
-        barWidget.setGlyphColor("primary")
-    else
-        barWidget.setGlyph("palette")
-        barWidget.setGlyphColor("on_surface_variant")
-    end
-
-    local hasHotspot = (type(telem.temp_junction_c) == "number" and telem.temp_junction_c > 0)
-    local tempJunc = if hasHotspot then telem.temp_junction_c else 0
-    local tempEdge = if type(telem.temp_edge_c) == "number" then telem.temp_edge_c else 0
-    local primaryTemp = if hasHotspot then tempJunc else tempEdge
-    local primaryTempRounded = math.floor(primaryTemp + 0.5)
-
-    local metricStr = ""
-    local metricChoice = if type(barMetric) == "string" and barMetric ~= "" then barMetric else "hotspot"
-
-    if metricChoice == "edge" then
-        metricStr = `{math.floor(tempEdge + 0.5)}°C`
-    elseif metricChoice == "gpu_busy" then
-        local gpuBusy = if type(telem.gpu_busy_percent) == "number" then telem.gpu_busy_percent else 0
-        metricStr = `{gpuBusy}%`
-    else
-        metricStr = `{primaryTempRounded}°C`
-    end
-
-    barWidget.setText(metricStr)
-
-    local gpuBusy = if type(telem.gpu_busy_percent) == "number" then telem.gpu_busy_percent else 0
-    local powerW = if type(telem.power_watts) == "number" then math.floor(telem.power_watts + 0.5) else 0
-    local sat = if type(dev.saturation) == "number" then dev.saturation else 100
-    local con = if type(dev.contrast) == "number" then dev.contrast else 100
-    local bri = if type(dev.brightness) == "number" then dev.brightness else 0
-
-    local tooltip = `Prisma Control Center\n`
-        .. `GPU: {gpuBusy}% | {if hasHotspot then "Hotspot" else "Borda"}: {primaryTempRounded}°C | Consumo: {powerW}W\n`
-        .. `Saturação: {sat}% | Contraste: {con}% | Brilho: {bri}%`
-
-    barWidget.setTooltip(tooltip)
-    barWidget.setVisible(true)
-end
-
-function onClick()
-    noctalia.togglePanel("deyvideguilherme/prisma:panel")
-end
-
-function onConfigChanged()
-    updateDisplay()
-end
-
--- Subscribe to state updates published by prisma_service
-noctalia.state.watch("status", function(newStatus)
-    currentStatus = newStatus
-    updateDisplay()
-end)
-
--- Initial presentation
-currentStatus = noctalia.state.get("status")
-updateDisplay()
-]==],
-        panel = [==[--!nonstrict
--- Prisma Control Center - Interactive Desktop Panel
--- Visual control center featuring live hardware telemetry, DCN color calibration, and profile management.
--- Uses standard Noctalia native primitives (ui.box, ui.column, ui.row, ui.label, ui.button, ui.progress, ui.input, ui.scroll).
-
-local currentTab = "performance" -- "performance" | "color" | "profiles"
-local newProfileName = ""
-local hasPendingColorUpdate = false
-local lastMutationErrorSeq = 0
-
--- Cached local state to provide instant feedback before service roundtrips
-local localDevice = {
-    enabled = 1,
-    saturation = 100,
-    contrast = 100,
-    brightness = 0,
-}
-
-local statusData = nil
-local render
-
-local function clamp(val, lo, hi)
-    return math.max(lo, math.min(hi, val))
-end
-
-local function sendCommand(cmd)
-    noctalia.state.set("command", cmd)
-end
-
-local function sendColorUpdate(immediate)
-    hasPendingColorUpdate = true
-    sendCommand({
-        action = "set",
-        enabled = localDevice.enabled,
-        saturation = localDevice.saturation,
-        contrast = localDevice.contrast,
-        brightness = localDevice.brightness,
-        immediate = immediate == true,
-    })
-end
-
--- ── Tab 1: Desempenho (Hardware Telemetry) ───────────────────────────────────
-
-local function performanceView()
-    local telem = (if statusData and statusData.telemetry then statusData.telemetry else {})
-
-    local gpuBusy = if type(telem.gpu_busy_percent) == "number" then telem.gpu_busy_percent else 0
-    local sclkMhz = if type(telem.sclk_mhz) == "number" then telem.sclk_mhz else 0
-
-    local hasHotspot = (type(telem.temp_junction_c) == "number" and telem.temp_junction_c > 0)
-    local tempJunc = if hasHotspot then math.floor(telem.temp_junction_c + 0.5) else 0
-    local tempEdge = if type(telem.temp_edge_c) == "number" then math.floor(telem.temp_edge_c + 0.5) else 0
-    local mainTemp = if hasHotspot then tempJunc else tempEdge
-    local tempCeiling = if hasHotspot then 110 else 95
-    local tempWarn = if hasHotspot then 85 else 80
-
-    local isApu = (telem.is_apu == true) or (telem.gpu_type == "APU")
-    local powerW = if type(telem.power_watts) == "number" then math.floor(telem.power_watts + 0.5) else 0
-    local powerMaxW = if type(telem.power_cap_watts) == "number" and telem.power_cap_watts > 0
-        then math.max(1, math.floor(telem.power_cap_watts + 0.5))
-        else (if isApu then 65 else 300)
-
-    local vramUsed = if type(telem.vram_used_mib) == "number" then telem.vram_used_mib else 0
-    local vramTotal = if type(telem.vram_total_mib) == "number" and telem.vram_total_mib > 0 then telem.vram_total_mib else 1
-    local vramRatio = clamp(vramUsed / vramTotal, 0, 1)
-
-    local gttUsed = if type(telem.gtt_used_mib) == "number" then telem.gtt_used_mib else 0
-    local gttTotal = if type(telem.gtt_total_mib) == "number" then telem.gtt_total_mib else 0
-
-    local card = if type(telem.card) == "string" and telem.card ~= "" then telem.card else "AMD GPU"
-    local pciId = if type(telem.pci_id) == "string" and telem.pci_id ~= "" then telem.pci_id else "AMD GPU"
-    local devId = if type(telem.device_id) == "string" and telem.device_id ~= "" then telem.device_id else "DCN"
-
-    -- 1. GPU Load & SCLK Clock Block
-    local gpuBlock = ui.column({ gap = 4, align = "stretch" }, {
-        ui.row({ align = "center", justify = "space_between" }, {
-            ui.label({ text = "CARGA DA GPU", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
-            ui.label({ text = `{sclkMhz} MHz`, fontSize = 12, color = "on_surface_variant" }),
-        }),
-        ui.row({ align = "baseline", gap = 6 }, {
-            ui.label({ text = `{gpuBusy}%`, fontSize = 22, fontWeight = "bold", color = "primary" }),
-            ui.label({ text = "Atividade de processamento gráfico", fontSize = 11, color = "on_surface_variant" }),
-        }),
-        ui.progress({
-            height = 8,
-            radius = 4,
-            progress = clamp(gpuBusy / 100, 0, 1),
-            fill = "primary",
-        }),
-    })
-
-    -- 2. Temperatures Block (Hotspot & Edge)
-    local tempRightLabel = if hasHotspot then `Borda: {tempEdge}°C` else "Sensor Único (Borda)"
-    local tempSubtitle = if hasHotspot then "Temperatura interna máxima da GPU (Hotspot)" else "Temperatura do encapsulamento da APU (Edge)"
-    local tempFill = if mainTemp > tempWarn then "error" else "secondary"
-
-    local tempBlock = ui.column({ gap = 4, align = "stretch" }, {
-        ui.row({ align = "center", justify = "space_between" }, {
-            ui.label({ text = "TEMPERATURA", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
-            ui.label({ text = tempRightLabel, fontSize = 12, color = "on_surface_variant" }),
-        }),
-        ui.row({ align = "baseline", gap = 6 }, {
-            ui.label({
-                text = `{mainTemp}°C`,
-                fontSize = 22,
-                fontWeight = "bold",
-                color = tempFill,
-            }),
-            ui.label({ text = tempSubtitle, fontSize = 11, color = "on_surface_variant" }),
-        }),
-        ui.progress({
-            height = 8,
-            radius = 4,
-            progress = clamp(mainTemp / tempCeiling, 0, 1),
-            fill = tempFill,
-        }),
-    })
-
-    -- 3. Power Consumption Block
-    local powerSubtitle = if isApu then "Potência elétrica do pacote APU (PPT)" else "Potência elétrica da placa"
-
-    local powerBlock = ui.column({ gap = 4, align = "stretch" }, {
-        ui.row({ align = "center", justify = "space_between" }, {
-            ui.label({ text = "CONSUMO DE ENERGIA", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
-            ui.label({ text = `Teto: {powerMaxW} W`, fontSize = 12, color = "on_surface_variant" }),
-        }),
-        ui.row({ align = "baseline", gap = 6 }, {
-            ui.label({ text = `{powerW} W`, fontSize = 22, fontWeight = "bold", color = "on_surface" }),
-            ui.label({ text = powerSubtitle, fontSize = 11, color = "on_surface_variant" }),
-        }),
-        ui.progress({
-            height = 8,
-            radius = 4,
-            progress = clamp(powerW / powerMaxW, 0, 1),
-            fill = "primary",
-        }),
-    })
-
-    -- 4. VRAM / Graphics Memory Allocation Block
-    local vramTitle = "MEMÓRIA VRAM"
-    local vramRightLabel = `{string.format("%.1f", vramUsed / 1024)} / {string.format("%.1f", vramTotal / 1024)} GiB`
-    local vramPercent = `{math.floor(vramRatio * 100 + 0.5)}%`
-    local vramSubtitle = `{math.floor(vramUsed)} MiB alocados`
-    local vramProgressVal = vramRatio
-
-    if isApu and gttTotal > 0 then
-        vramTitle = "MEMÓRIA GRÁFICA (VRAM + GTT)"
-        local combinedUsed = vramUsed + gttUsed
-        local combinedTotal = vramTotal + gttTotal
-        local memRatio = clamp(combinedUsed / combinedTotal, 0, 1)
-
-        vramRightLabel = `{string.format("%.1f", combinedUsed / 1024)} / {string.format("%.1f", combinedTotal / 1024)} GiB`
-        vramPercent = `{math.floor(memRatio * 100 + 0.5)}%`
-        vramSubtitle = `{math.floor(vramUsed)}/{math.floor(vramTotal)} MiB VRAM + {math.floor(gttUsed)} MiB GTT`
-        vramProgressVal = memRatio
-    end
-
-    local vramBlock = ui.column({ gap = 4, align = "stretch" }, {
-        ui.row({ align = "center", justify = "space_between" }, {
-            ui.label({ text = vramTitle, fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
-            ui.label({
-                text = vramRightLabel,
-                fontSize = 12,
-                color = "on_surface_variant",
-            }),
-        }),
-        ui.row({ align = "baseline", gap = 6 }, {
-            ui.label({ text = vramPercent, fontSize = 22, fontWeight = "bold", color = "primary" }),
-            ui.label({ text = vramSubtitle, fontSize = 11, color = "on_surface_variant" }),
-        }),
-        ui.progress({
-            height = 8,
-            radius = 4,
-            progress = vramProgressVal,
-            fill = "primary",
-        }),
-    })
-
-    -- Hardware Identity Footer Row
-    local cardDisplay = `{card} ({if isApu then "APU" else "dGPU"})`
-    local infoRow = ui.row({ align = "center", justify = "space_between" }, {
-        ui.row({ gap = 12, align = "center" }, {
-            ui.label({ text = cardDisplay, fontSize = 12, fontWeight = "bold", color = "on_surface" }),
-            ui.label({ text = pciId, fontSize = 12, color = "on_surface_variant" }),
-            ui.label({ text = devId, fontSize = 12, color = "on_surface_variant" }),
-        }),
-        ui.label({
-            text = if statusData and statusData.available then "Hardware Ativo" else "Offline",
-            fontSize = 12,
-            fontWeight = "bold",
-            color = if statusData and statusData.available then "primary" else "error",
-        }),
-    })
-
-    return ui.column({ gap = 16, align = "stretch" }, {
-        gpuBlock,
-        tempBlock,
-        powerBlock,
-        vramBlock,
-        infoRow,
-    })
-end
-
--- ── Tab 2: Tela & Cor (DCN Color Adjustments) ────────────────────────────────
-
-local function interactiveBar(value, minVal, maxVal, isEnabled, onSelectValue)
-    local segments = {}
-    for i = 1, 25 do
-        local targetVal = math.floor(minVal + ((i - 1) / 24) * (maxVal - minVal) + 0.5)
-        local isFilled = (targetVal <= value)
-        local fill = if isFilled then (if isEnabled then "primary" else "outline_variant") else "surface_container_highest"
-
-        local onClick = function()
-            if not isEnabled then
-                return
-            end
-            onSelectValue(targetVal)
-            sendColorUpdate(true)
-            render()
-        end
-
-        table.insert(segments, ui.box({
-            height = 14,
-            flexGrow = 1,
-            radius = 3,
-            fill = fill,
-            onClick = onClick,
-        }))
-    end
-    return ui.row({ gap = 2, align = "center" }, segments)
-end
-
-local function colorView()
-    local isEnabled = (localDevice.enabled == 1)
-
-    -- 1. Master Enable Toggle Row
-    local masterRow = ui.row({ align = "center", justify = "space_between" }, {
-        ui.column({ gap = 2, flexGrow = 1 }, {
-            ui.label({ text = "Calibragem de Cor em Hardware", fontSize = 14, fontWeight = "bold" }),
-            ui.label({
-                text = "Ajusta saturação, contraste e brilho diretamente na saída de vídeo da placa",
-                fontSize = 11,
-                color = "on_surface_variant",
-            }),
-        }),
-        ui.button({
-            text = if isEnabled then "Calibragem: ATIVADA" else "Calibragem: DESATIVADA",
-            glyph = if isEnabled then "check" else "x",
-            variant = if isEnabled then "primary" else "outline",
-            onClick = "onToggleMaster",
-        }),
-    })
-
-    -- 2. Precision Parameter Block with Interactive Bar & Direct Input
-    local function parameterBlock(keyId, title, subtitle, value, minVal, maxVal, defaultVal, onSelectValue, onSub1, onAdd1, onReset)
-        local onSubmitInput = function(text)
-            if not isEnabled then
-                return
-            end
-            local trimmed = noctalia.string.trim(text)
-            if string.sub(trimmed, -1) == "%" then
-                trimmed = noctalia.string.trim(string.sub(trimmed, 1, -2))
-            end
-            local num = tonumber(trimmed)
-            if num ~= nil then
-                local clamped = clamp(math.floor(num + 0.5), minVal, maxVal)
-                onSelectValue(clamped)
-                sendColorUpdate(true)
-                render()
-            else
-                render()
-            end
-        end
-
-        local headerRow = ui.row({ align = "center", justify = "space_between" }, {
-            ui.column({ gap = 2, flexGrow = 1 }, {
-                ui.label({ text = title, fontSize = 13, fontWeight = "bold" }),
-                ui.label({ text = subtitle, fontSize = 11, color = "on_surface_variant" }),
-            }),
-            ui.row({ gap = 6, align = "center" }, {
-                ui.label({ text = `{value}%`, fontSize = 15, fontWeight = "bold", color = "primary" }),
-                ui.input({
-                    key = `input_{keyId}_{value}`,
-                    placeholder = tostring(value),
-                    width = 64,
-                    onSubmit = onSubmitInput,
-                }),
-                ui.button({
-                    text = "-1",
-                    variant = "ghost",
-                    enabled = isEnabled and value > minVal,
-                    onClick = onSub1,
-                }),
-                ui.button({
-                    text = "+1",
-                    variant = "ghost",
-                    enabled = isEnabled and value < maxVal,
-                    onClick = onAdd1,
-                }),
-                ui.button({
-                    glyph = "rotate",
-                    text = `{defaultVal}%`,
-                    variant = "outline",
-                    tooltip = `Restaurar padrão ({defaultVal}%)`,
-                    enabled = isEnabled and value ~= defaultVal,
-                    onClick = onReset,
-                }),
-            }),
-        })
-
-        local bar = interactiveBar(value, minVal, maxVal, isEnabled, onSelectValue)
-
-        return ui.column({ gap = 8, align = "stretch" }, {
-            headerRow,
-            bar,
-        })
-    end
-
-    local satBlock = parameterBlock(
-        "saturation",
-        "Saturação",
-        "Intensidade e vivacidade das cores na tela (0..400%)",
-        localDevice.saturation,
-        0, 400, 100,
-        function(val) localDevice.saturation = clamp(val, 0, 400) end,
-        "onSaturationSub1",
-        "onSaturationAdd1",
-        "onSaturationReset"
-    )
-
-    local conBlock = parameterBlock(
-        "contrast",
-        "Contraste",
-        "Diferença entre tons claros e escuros (10..300%)",
-        localDevice.contrast,
-        10, 300, 100,
-        function(val) localDevice.contrast = clamp(val, 10, 300) end,
-        "onContrastSub1",
-        "onContrastAdd1",
-        "onContrastReset"
-    )
-
-    local briBlock = parameterBlock(
-        "brightness",
-        "Brilho",
-        "Nível geral de luminosidade da imagem (-100..100%)",
-        localDevice.brightness,
-        -100, 100, 0,
-        function(val) localDevice.brightness = clamp(val, -100, 100) end,
-        "onBrightnessSub1",
-        "onBrightnessAdd1",
-        "onBrightnessReset"
-    )
-
-    -- 3. Presets Rápidos
-    local presetsBlock = ui.column({ gap = 8, align = "stretch" }, {
-        ui.label({ text = "PRESETS RÁPIDOS", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
-        ui.row({ gap = 8, align = "center" }, {
-            ui.button({
-                text = "Padrão",
-                glyph = "rotate",
-                variant = "outline",
-                enabled = isEnabled,
-                onClick = "onPresetStandard",
-                flexGrow = 1,
-            }),
-            ui.button({
-                text = "Competitivo",
-                glyph = "device-gamepad-2",
-                variant = "outline",
-                enabled = isEnabled,
-                onClick = "onPresetCompetitive",
-                flexGrow = 1,
-            }),
-            ui.button({
-                text = "Cinema",
-                glyph = "movie",
-                variant = "outline",
-                enabled = isEnabled,
-                onClick = "onPresetCinema",
-                flexGrow = 1,
-            }),
-            ui.button({
-                text = "Mono",
-                glyph = "palette",
-                variant = "outline",
-                enabled = isEnabled,
-                onClick = "onPresetMono",
-                flexGrow = 1,
-            }),
-        }),
-    })
-
-    return ui.column({ gap = 16, align = "stretch" }, {
-        masterRow,
-        satBlock,
-        conBlock,
-        briBlock,
-        presetsBlock,
-    })
-end
-
--- ── Tab 3: Perfis (Profiles Management) ──────────────────────────────────────
-
-local function profilesView()
-    local profiles = if statusData and statusData.profiles then statusData.profiles else {}
-
-    -- Save Profile Block
-    local saveBlock = ui.column({ gap = 8, align = "stretch" }, {
-        ui.label({ text = "SALVAR ESTADO ATUAL", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
-        ui.row({ gap = 8, align = "center" }, {
-            ui.input({
-                key = "profile_input",
-                placeholder = "Nome do perfil (ex: jogos, filmes)",
-                value = newProfileName,
-                flexGrow = 1,
-                onChange = "onProfileNameChange",
-                onSubmit = "onSaveProfileSubmit",
-            }),
-            ui.button({
-                text = "Salvar",
-                glyph = "device-floppy",
-                variant = "primary",
-                enabled = (newProfileName ~= ""),
-                onClick = "onSaveProfileClicked",
-            }),
-        }),
-    })
-
-    -- Profile List Items
-    local profileRows = {}
-    if #profiles == 0 then
-        table.insert(profileRows, ui.label({
-            text = "Nenhum perfil salvo ainda",
-            color = "on_surface_variant",
-            fontSize = 12,
-        }))
-    else
-        for _, p in ipairs(profiles) do
-            local name = p.name or "perfil"
-            local sat = p.saturation or 100
-            local con = p.contrast or 100
-            local bri = p.brightness or 0
-
-            local onApply = function()
-                hasPendingColorUpdate = false
-                sendCommand({ action = "profile_apply", name = name })
-            end
-
-            local onDelete = function()
-                sendCommand({ action = "profile_delete", name = name })
-            end
-
-            table.insert(profileRows, ui.row({ align = "center", justify = "space_between" }, {
-                ui.column({ gap = 2, flexGrow = 1 }, {
-                    ui.label({ text = name, fontSize = 14, fontWeight = "bold" }),
-                    ui.label({
-                        text = `Saturação: {sat}% | Contraste: {con}% | Brilho: {bri}%`,
-                        fontSize = 11,
-                        color = "on_surface_variant",
-                    }),
-                }),
-                ui.row({ gap = 6, align = "center" }, {
-                    ui.button({
-                        text = "Aplicar",
-                        glyph = "check",
-                        variant = "primary",
-                        onClick = onApply,
-                    }),
-                    ui.button({
-                        glyph = "trash",
-                        variant = "destructive",
-                        tooltip = `Excluir perfil '{name}'`,
-                        onClick = onDelete,
-                    }),
-                }),
-            }))
-        end
-    end
-
-    local listBlock = ui.column({ gap = 8, align = "stretch" }, {
-        ui.label({ text = "PERFIS SALVOS", fontSize = 11, fontWeight = "bold", color = "on_surface_variant" }),
-        ui.column({ gap = 10, align = "stretch" }, profileRows),
-    })
-
-    -- Profile Actions Footer
-    local actionsRow = ui.row({ align = "center", justify = "space_between" }, {
-        ui.button({
-            glyph = "refresh",
-            text = "Recarregar Lista",
-            variant = "ghost",
-            onClick = "onRefreshProfilesClicked",
-        }),
-        ui.button({
-            text = "Restaurar Padrões",
-            glyph = "rotate",
-            variant = "destructive",
-            onClick = "onResetDefaultsClicked",
-        }),
-    })
-
-    return ui.column({ gap = 16, align = "stretch" }, {
-        saveBlock,
-        listBlock,
-        actionsRow,
-    })
-end
-
--- ── Main Panel Render ────────────────────────────────────────────────────────
-
-render = function()
-    -- Check if a mutation error occurred to unlock optimistic state and resync
-    if statusData and type(statusData.mutation_error_seq) == "number" then
-        if statusData.mutation_error_seq > lastMutationErrorSeq then
-            lastMutationErrorSeq = statusData.mutation_error_seq
-            hasPendingColorUpdate = false
-        end
-    end
-
-    -- Sync local state with status
-    if statusData and statusData.device then
-        local dev = statusData.device
-        if not hasPendingColorUpdate then
-            localDevice.enabled = if type(dev.enabled) == "number" then dev.enabled else 1
-            localDevice.saturation = if type(dev.saturation) == "number" then dev.saturation else 100
-            localDevice.contrast = if type(dev.contrast) == "number" then dev.contrast else 100
-            localDevice.brightness = if type(dev.brightness) == "number" then dev.brightness else 0
-        elseif dev.saturation == localDevice.saturation and
-               dev.contrast == localDevice.contrast and
-               dev.brightness == localDevice.brightness and
-               dev.enabled == localDevice.enabled then
-            hasPendingColorUpdate = false
-        end
-    end
-
-    -- Header row
-    local header = ui.row({ align = "center", justify = "space_between" }, {
-        ui.row({ gap = 8, align = "center" }, {
-            ui.label({ text = "Prisma Control Center", fontSize = 16, fontWeight = "bold", color = "on_surface" }),
-        }),
-        ui.button({ glyph = "x", variant = "ghost", tooltip = "Fechar", onClick = "onCloseClicked" }),
-    })
-
-    -- Navigation tab buttons
-    local nav = ui.row({ gap = 8, align = "center" }, {
-        ui.button({
-            text = "Desempenho",
-            glyph = "chart-line",
-            variant = if currentTab == "performance" then "primary" else "ghost",
-            onClick = "onTabPerformance",
-            flexGrow = 1,
-        }),
-        ui.button({
-            text = "Tela & Cor",
-            glyph = "adjustments",
-            variant = if currentTab == "color" then "primary" else "ghost",
-            onClick = "onTabColor",
-            flexGrow = 1,
-        }),
-        ui.button({
-            text = "Perfis",
-            glyph = "palette",
-            variant = if currentTab == "profiles" then "primary" else "ghost",
-            onClick = "onTabProfiles",
-            flexGrow = 1,
-        }),
-    })
-
-    -- Error banner if present
-    local banner = nil
-    if statusData and type(statusData.error) == "string" and statusData.error ~= "" then
-        banner = ui.row({ gap = 8, align = "center" }, {
-            ui.label({ text = `! {statusData.error}`, color = "error", fontSize = 12 }),
-        })
-    end
-
-    -- Body content based on active tab
-    local tabContent
-    if currentTab == "color" then
-        tabContent = colorView()
-    elseif currentTab == "profiles" then
-        tabContent = profilesView()
-    else
-        tabContent = performanceView()
-    end
-
-    local children = { header, nav }
-    if banner ~= nil then
-        table.insert(children, banner)
-    end
-    table.insert(children, ui.scroll({ flexGrow = 1, gap = 12 }, { tabContent }))
-
-    panel.render(ui.column({ flexGrow = 1, gap = 14, align = "stretch" }, children))
-end
-
--- ── Event Callbacks ──────────────────────────────────────────────────────────
-
-function onTabPerformance()
-    currentTab = "performance"
-    render()
-end
-
-function onTabColor()
-    currentTab = "color"
-    render()
-end
-
-function onTabProfiles()
-    currentTab = "profiles"
-    sendCommand({ action = "profile_list" })
-    render()
-end
-
-function onCloseClicked()
-    sendCommand({ action = "panel_state", open = false })
-    panel.close()
-end
-
-function onToggleMaster()
-    localDevice.enabled = if localDevice.enabled == 1 then 0 else 1
-    sendColorUpdate(true)
-    render()
-end
-
-function onSaturationSub1()
-    localDevice.saturation = clamp(localDevice.saturation - 1, 0, 400)
-    sendColorUpdate(true)
-    render()
-end
-
-function onSaturationAdd1()
-    localDevice.saturation = clamp(localDevice.saturation + 1, 0, 400)
-    sendColorUpdate(true)
-    render()
-end
-
-function onSaturationReset()
-    localDevice.saturation = 100
-    sendColorUpdate(true)
-    render()
-end
-
-function onContrastSub1()
-    localDevice.contrast = clamp(localDevice.contrast - 1, 10, 300)
-    sendColorUpdate(true)
-    render()
-end
-
-function onContrastAdd1()
-    localDevice.contrast = clamp(localDevice.contrast + 1, 10, 300)
-    sendColorUpdate(true)
-    render()
-end
-
-function onContrastReset()
-    localDevice.contrast = 100
-    sendColorUpdate(true)
-    render()
-end
-
-function onBrightnessSub1()
-    localDevice.brightness = clamp(localDevice.brightness - 1, -100, 100)
-    sendColorUpdate(true)
-    render()
-end
-
-function onBrightnessAdd1()
-    localDevice.brightness = clamp(localDevice.brightness + 1, -100, 100)
-    sendColorUpdate(true)
-    render()
-end
-
-function onBrightnessReset()
-    localDevice.brightness = 0
-    sendColorUpdate(true)
-    render()
-end
-
-function onPresetStandard()
-    localDevice.saturation = 100
-    localDevice.contrast = 100
-    localDevice.brightness = 0
-    localDevice.enabled = 1
-    sendColorUpdate(true)
-    render()
-end
-
-function onPresetCompetitive()
-    localDevice.saturation = 160
-    localDevice.contrast = 115
-    localDevice.brightness = 10
-    localDevice.enabled = 1
-    sendColorUpdate(true)
-    render()
-end
-
-function onPresetCinema()
-    localDevice.saturation = 120
-    localDevice.contrast = 105
-    localDevice.brightness = -5
-    localDevice.enabled = 1
-    sendColorUpdate(true)
-    render()
-end
-
-function onPresetMono()
-    localDevice.saturation = 0
-    localDevice.contrast = 110
-    localDevice.brightness = 0
-    localDevice.enabled = 1
-    sendColorUpdate(true)
-    render()
-end
-
-function onProfileNameChange(text)
-    local wasEmpty = (newProfileName == "")
-    newProfileName = noctalia.string.trim(text)
-    local isEmpty = (newProfileName == "")
-    if wasEmpty ~= isEmpty then
-        render()
-    end
-end
-
-function onSaveProfileSubmit(text)
-    local name = noctalia.string.trim(text)
-    if name ~= "" then
-        sendCommand({ action = "profile_save", name = name })
-        newProfileName = ""
-        render()
-    end
-end
-
-function onSaveProfileClicked()
-    if newProfileName ~= "" then
-        sendCommand({ action = "profile_save", name = newProfileName })
-        newProfileName = ""
-        render()
-    end
-end
-
-function onRefreshProfilesClicked()
-    sendCommand({ action = "profile_list" })
-end
-
-function onResetDefaultsClicked()
-    hasPendingColorUpdate = false
-    sendCommand({ action = "profile_reset" })
-end
-
--- Subscribe to telemetry/state updates
-noctalia.state.watch("status", function(newStatus)
-    statusData = newStatus
-    render()
-end)
-
--- Notify service that panel is open
-sendCommand({ action = "panel_state", open = true })
-
--- Initial render
-statusData = noctalia.state.get("status")
-if statusData and type(statusData.mutation_error_seq) == "number" then
-    lastMutationErrorSeq = statusData.mutation_error_seq
-end
-render()
-]==],
-    }
-end
-
-assert(sources ~= nil and sources.service and sources.widget and sources.panel, "Failed to obtain UI component sources")
+-- check_ui.py supplies the current plugin sources and both translation catalogs.
+local loaded, sources = pcall(require, "./ui_sources")
+assert(loaded, "Run python3 tests/check_ui.py to load the plugin and its translations")
 
 -- Tree inspection helpers
 local function findNodes(tree, predicate, acc)
@@ -1496,6 +211,26 @@ local function findProgressBars(tree)
 end
 
 -- Mock Environment & Noctalia APIs
+local catalogs = {
+    ["pt-BR"] = decodeJson(sources.translations["pt-BR"]),
+    en = decodeJson(sources.translations.en),
+}
+local language = "pt-BR"
+local function translate(key, substitutions)
+    local value = catalogs[language]
+    for part in string.gmatch(key, "[^.]+") do
+        if type(value) ~= "table" then return key end
+        value = value[part]
+    end
+    if type(value) ~= "string" then return key end
+    return (string.gsub(value, "{([%w_]+)}", function(name)
+        if substitutions and substitutions[name] ~= nil then
+            return tostring(substitutions[name])
+        end
+        return "{" .. name .. "}"
+    end))
+end
+
 local mockConfig = {
     bar_metric = "hotspot",
     hide_inactive = false,
@@ -1503,9 +238,11 @@ local mockConfig = {
 
 local mockStatusResponse = {
     exitCode = 0,
-    stdout = [[{"device":{"enabled":1,"saturation":100,"contrast":100,"brightness":0},"telemetry":{"card":"card1","pci_id":"0000:07:00.0","device_id":"1002:1638","is_apu":true,"gpu_busy_percent":2,"sclk_mhz":400,"vram_used_mib":455.3,"vram_total_mib":512.0,"gtt_used_mib":643.9,"gtt_total_mib":7649.9,"temp_edge_c":34.0,"temp_junction_c":null,"power_watts":25.0}}]],
+    stdout = [[{"device":{"enabled":1,"saturation":100,"contrast":100,"brightness":0},"telemetry":{"card":"card1","gpu_name":"AMD Radeon Graphics (Cezanne)","pci_id":"0000:07:00.0","device_id":"1002:1638","is_apu":true,"gpu_busy_percent":2,"sclk_mhz":400,"vram_used_mib":455.3,"vram_total_mib":512.0,"gtt_used_mib":643.9,"gtt_total_mib":7649.9,"temp_edge_c":34.0,"temp_junction_c":null,"power_watts":25.0}}]],
     stderr = "",
 }
+
+local mockProfilesResponse = { exitCode = 0, stdout = "[]", stderr = "" }
 
 local mockBar = {
     glyph = "",
@@ -1536,14 +273,15 @@ local noctalia = {
     string = {
         trim = trim,
     },
+    tr = translate,
     json = {
         decode = decodeJson,
     },
     runAsync = function(cmd, cb)
         if string.find(cmd, "prisma-ctl status --json", 1, true) then
             cb(mockStatusResponse)
-        elseif string.find(cmd, "prisma-ctl profile list", 1, true) then
-            cb({ exitCode = 0, stdout = "", stderr = "" })
+        elseif cmd == "prisma-ctl profile list --json" then
+            cb(mockProfilesResponse)
         elseif string.find(cmd, "prisma-ctl set", 1, true) then
             if deferSetCommands then
                 table.insert(pendingAsyncCallbacks, { cmd = cmd, cb = cb })
@@ -1650,6 +388,24 @@ assert(hasLabelWithText(tree1, "Teto: 65 W"), "Scenario 1: tree must contain lab
 assert(hasLabelWithText(tree1, "Sensor Único (Borda)"), "Scenario 1: tree must contain label 'Sensor Único (Borda)'")
 assert(hasLabelWithText(tree1, "card1 (APU)"), "Scenario 1: tree must contain label 'card1 (APU)'")
 assert(hasLabelWithText(tree1, "455/512 MiB VRAM + 643 MiB GTT"), "Scenario 1: tree must contain label '455/512 MiB VRAM + 643 MiB GTT'")
+
+local footers = findNodes(tree1, function(n)
+    if n.type ~= "column" or #n.children ~= 2 then return false end
+    local identity, ids = n.children[1], n.children[2]
+    return identity.type == "row" and ids.type == "row"
+        and hasLabelWithText(identity, "card1 (APU) — AMD Radeon Graphics (Cezanne)")
+        and hasLabelWithText(identity, "Hardware Ativo")
+        and hasLabelWithText(ids, "0000:07:00.0")
+        and hasLabelWithText(ids, "1002:1638")
+end)
+assert(#footers == 1, "GPU name/status and PCI IDs must occupy separate footer rows")
+local footer = footers[1]
+assert(footer.props.gap == 4 and footer.props.align == "stretch")
+assert(footer.children[1].props.justify == "space_between" and footer.children[1].props.gap == 8)
+assert(footer.children[2].props.gap == 12)
+for _, label in ipairs(footer.children[2].children) do
+    assert(label.props.fontSize == 11 and label.props.color == "on_surface_variant")
+end
 
 local pbars1 = findProgressBars(tree1)
 local expPowerRatio1 = 25 / 65
@@ -2043,4 +799,88 @@ end
 assert(foundPower9_5, "Scenario 9.5: power progress bar must not divide by zero and reach 1.0 ratio")
 print("  [PASS] Scenario 9 passed.")
 
+print("[test_ui] Running profile JSON and active state tests...")
+mockProfilesResponse.stdout = [=[
+[
+    {"brightness":0, "enabled":1, "name":"padrao", "contrast":100, "saturation":100},
+    {"brightness":0, "enabled":0, "name":"desativado", "contrast":100, "saturation":100},
+    {"brightness":-5, "enabled":1, "name":"cinema", "contrast":105, "saturation":120},
+    false,
+    {"name": {}, "saturation":100, "contrast":100, "brightness":0, "enabled":1},
+    {"name":"invalido", "saturation":"texto", "contrast":100, "brightness":0, "enabled":1}
+]
+]=]
+mockEnv.onTabProfiles()
+local profiles = mockState.status.profiles
+assert(#profiles == 3, "Only valid JSON profile entries should reach the panel")
+assert(profiles[3].name == "cinema" and profiles[3].saturation == 120 and profiles[3].contrast == 105
+    and profiles[3].brightness == -5 and profiles[3].enabled == 1, "Profile values should retain their numeric types")
+
+local function assertProfileActive(name, active)
+    local rows = findNodes(mockPanel.tree, function(n)
+        return n.type == "row" and hasLabelWithText(n, name)
+            and #findNodes(n, function(child) return child.props.glyph == "trash" end) == 1
+    end)
+    assert(#rows == 1, "Missing profile row for " .. name)
+    local apply = findNodes(rows[1], function(n) return n.props.glyph == "check" end)[1]
+    local delete = findNodes(rows[1], function(n) return n.props.glyph == "trash" end)[1]
+    assert((apply.props.enabled == false) == active, "Unexpected apply state for " .. name)
+    assert(delete.props.enabled ~= false and type(delete.props.onClick) == "function", "Deletion must remain available")
+end
+assertProfileActive("padrao", true)
+assertProfileActive("desativado", false)
+assertProfileActive("cinema", false)
+
+for _, invalid in ipairs({ "[", '"invalid"', '{"name":"object"}' }) do
+    mockProfilesResponse.stdout = invalid
+    mockEnv.onTabProfiles()
+    assert(#mockState.status.profiles == 3, "Invalid JSON or shape should preserve saved profiles")
+end
+mockProfilesResponse.stdout = "[]"
+mockEnv.onTabProfiles()
+assert(#mockState.status.profiles == 0, "An empty JSON list must clear saved profiles")
+
+mockEnv.onTabColor()
+local function checkPreset(sat, con, bri, enabled, available, expected)
+    local status = table.clone(mockState.status)
+    status.device = { saturation = sat, contrast = con, brightness = bri, enabled = enabled, available = available }
+    noctalia.state.set("status", status)
+    for _, name in ipairs({ "Padrão", "Competitivo", "Cinema", "Mono" }) do
+        local buttons = findNodes(mockPanel.tree, function(n)
+            return n.type == "button" and n.props.text == name
+        end)
+        assert(#buttons == 1, "Missing quick preset " .. name)
+        assert(buttons[1].props.variant == (if name == expected then "primary" else "outline"),
+            "Unexpected preset highlight for " .. name)
+    end
+end
+checkPreset(100, 100, 0, 1, true, "Padrão")
+checkPreset(160, 115, 10, 1, true, "Competitivo")
+checkPreset(120, 105, -5, 1, true, "Cinema")
+checkPreset(0, 110, 0, 1, true, "Mono")
+checkPreset(160, 115, 9, 1, true, nil)
+checkPreset(100, 100, 0, 0, true, nil)
+checkPreset(100, 100, 0, 1, false, nil)
+print("[test_ui] Running panel and widget localization tests...")
+local function assertLanguage(performance, brightness)
+    mockEnv.onTabPerformance()
+    local tabs = findNodes(mockPanel.tree, function(n)
+        return n.type == "button" and n.props.text == performance
+    end)
+    assert(#tabs == 1, "Performance tab must display " .. performance)
+    mockEnv.onConfigChanged()
+    assert(string.find(mockBar.tooltip, brightness, 1, true), "Missing translated widget value: " .. brightness)
+end
+
+language = "en"
+assertLanguage("Performance", "Brightness: 0%")
+language = "pt-BR"
+assertLanguage("Desempenho", "Brilho: 0%")
+language = "en"
+noctalia.tr = nil
+assertLanguage("Desempenho", "Brilho: 0%")
+noctalia.tr = function(key) return key end
+assertLanguage("Desempenho", "Brilho: 0%")
+noctalia.tr = function() error("translation lookup failed") end
+assertLanguage("Desempenho", "Brilho: 0%")
 print("All Luau UI behavioral tests PASSED successfully!")
