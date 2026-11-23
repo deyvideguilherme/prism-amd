@@ -34,6 +34,8 @@
       "offline": "Offline",
       "edge": "Edge: {temperature}°C",
       "power_cap": "Limit: {power} W",
+      "peak": "Peak: {value}",
+      "reset_peaks": "Reset peaks",
       "allocated": "{memory} MiB allocated"
     },
     "color": {
@@ -96,7 +98,8 @@
   },
   "widget": {
     "offline": "Hardware unavailable or module not loaded",
-    "sensors": "GPU: {load}% | {sensor}: {temperature}°C | Power: {power}W",
+    "active_rule": "Niri rule: {pattern}",
+    "sensors": "GPU: {load} | {sensor}: {temperature} | Power: {power}",
     "edge": "Edge",
     "hotspot": "Hotspot"
   },

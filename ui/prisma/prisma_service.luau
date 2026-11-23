@@ -53,6 +53,8 @@ local historyGpu = {}
 local historyTempJunc = {}
 local historyPower = {}
 local historySclk = {}
+local peaks = { gpu_busy_max = 0, temp_max = 0, power_max = 0, sclk_max = 0 }
+local sensorAvailable = {}
 
 local savedProfiles = {}
 local profilesError = nil
@@ -112,11 +114,17 @@ local function runCommand(command, callback)
     end
 end
 
-local function appendHistory(buf, val)
+local function validSample(val)
+    return type(val) == "number" and val > -math.huge and val < math.huge
+end
+
+local function recordSample(buf, val, peakKey)
+    if not validSample(val) then return end
     table.insert(buf, val)
     if #buf > MAX_HISTORY then
         table.remove(buf, 1)
     end
+    peaks[peakKey] = math.max(peaks[peakKey], val)
 end
 
 local function publishStatus()
@@ -132,6 +140,7 @@ local function publishStatus()
             brightness = currentDev.brightness,
         },
         telemetry = {
+            sensor_available = sensorAvailable,
             card = telemetryState.card,
             pci_id = telemetryState.pci_id,
             device_id = telemetryState.device_id,
@@ -155,6 +164,7 @@ local function publishStatus()
             power = historyPower,
             sclk = historySclk,
         },
+        peaks = table.clone(peaks),
         profiles = savedProfiles,
         profiles_error = profilesError,
         automation = {
@@ -184,6 +194,7 @@ local function pollStatus(force, onComplete)
 
     runCommand("prisma-ctl status --json", function(result)
         isPolling = false
+        sensorAvailable = {}
         local freshDeviceSnapshot = false
         if result.exitCode == 0 and type(result.stdout) == "string" and result.stdout ~= "" then
             local ok, parsed = pcall(function()
@@ -242,14 +253,16 @@ local function pollStatus(force, onComplete)
                     telemetryState.temp_junction_c = if type(telem.temp_junction_c) == "number" then telem.temp_junction_c else 0
                     telemetryState.power_watts = if type(telem.power_watts) == "number" then telem.power_watts else 0
                     telemetryState.power_cap_watts = if type(telem.power_cap_watts) == "number" then telem.power_cap_watts else 0
+                    sensorAvailable.gpu_busy_percent = validSample(telem.gpu_busy_percent)
+                    sensorAvailable.temp_edge_c = validSample(telem.temp_edge_c)
+                    sensorAvailable.temp_junction_c = validSample(telem.temp_junction_c) and telem.temp_junction_c > 0
+                    sensorAvailable.power_watts = validSample(telem.power_watts)
+                    local temperature = if sensorAvailable.temp_junction_c then telem.temp_junction_c else telem.temp_edge_c
+                    recordSample(historyGpu, telem.gpu_busy_percent, "gpu_busy_max")
+                    recordSample(historyTempJunc, temperature, "temp_max")
+                    recordSample(historyPower, telem.power_watts, "power_max")
+                    recordSample(historySclk, telem.sclk_mhz, "sclk_max")
                 end
-
-                local effectiveTemp = if telemetryState.temp_junction_c > 0 then telemetryState.temp_junction_c else telemetryState.temp_edge_c
-
-                appendHistory(historyGpu, telemetryState.gpu_busy_percent)
-                appendHistory(historyTempJunc, effectiveTemp)
-                appendHistory(historyPower, telemetryState.power_watts)
-                appendHistory(historySclk, telemetryState.sclk_mhz)
 
                 lastErrorMessage = ""
             else
@@ -672,6 +685,10 @@ local function handleCommand(cmd)
             isDirty = true
             dirtyTicks = 0
         end
+
+    elseif cmd.action == "reset_peaks" then
+        for key in pairs(peaks) do peaks[key] = 0 end
+        publishStatus()
 
     elseif cmd.action == "profile_save" then
         local name = cmd.name
