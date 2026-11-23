@@ -49,6 +49,7 @@ local historySclk = {}
 
 local savedProfiles = {}
 local lastErrorMessage = ""
+local mutationErrorSeq = 0
 
 -- Debounce tracking
 local isDirty = false
@@ -117,6 +118,7 @@ local function publishStatus()
         profiles = savedProfiles,
         panel_open = panelOpen,
         error = if lastErrorMessage ~= "" then lastErrorMessage else nil,
+        mutation_error_seq = mutationErrorSeq,
     })
 end
 
@@ -231,9 +233,15 @@ local function refreshProfiles()
 end
 
 local function flushSetCommand()
-    if isMutating then return end
+    if isMutating then
+        isDirty = true
+        dirtyTicks = 0
+        return
+    end
     if not isDeviceAvailable then
         isDirty = false
+        mutationErrorSeq += 1
+        lastErrorMessage = "Módulo chroma_amd não disponível para gravação"
         publishStatus()
         return
     end
@@ -257,11 +265,22 @@ local function flushSetCommand()
             deviceState.enabled = en
             lastErrorMessage = ""
         else
+            mutationErrorSeq += 1
+            if not isDirty then
+                pendingState.saturation = deviceState.saturation
+                pendingState.contrast = deviceState.contrast
+                pendingState.brightness = deviceState.brightness
+                pendingState.enabled = deviceState.enabled
+            end
             lastErrorMessage = noctalia.string.trim(result.stderr or result.stdout or "Falha ao aplicar parâmetros")
             log(`Erro ao aplicar comando set: {lastErrorMessage}`)
         end
         publishStatus()
-        pollStatus()
+        if isDirty then
+            flushSetCommand()
+        else
+            pollStatus()
+        end
     end)
 end
 
@@ -285,7 +304,12 @@ local function handleCommand(cmd)
         publishStatus()
 
         if cmd.immediate then
-            flushSetCommand()
+            if isMutating then
+                isDirty = true
+                dirtyTicks = 0
+            else
+                flushSetCommand()
+            end
         else
             isDirty = true
             dirtyTicks = 0

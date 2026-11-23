@@ -263,6 +263,7 @@ local historySclk = {}
 
 local savedProfiles = {}
 local lastErrorMessage = ""
+local mutationErrorSeq = 0
 
 -- Debounce tracking
 local isDirty = false
@@ -327,6 +328,7 @@ local function publishStatus()
         profiles = savedProfiles,
         panel_open = panelOpen,
         error = if lastErrorMessage ~= "" then lastErrorMessage else nil,
+        mutation_error_seq = mutationErrorSeq,
     })
 end
 
@@ -432,7 +434,18 @@ local function refreshProfiles()
 end
 
 local function flushSetCommand()
-    if isMutating then return end
+    if isMutating then
+        isDirty = true
+        dirtyTicks = 0
+        return
+    end
+    if not isDeviceAvailable then
+        isDirty = false
+        mutationErrorSeq += 1
+        lastErrorMessage = "Módulo chroma_amd não disponível para gravação"
+        publishStatus()
+        return
+    end
     isDirty = false
     isMutating = true
 
@@ -453,11 +466,22 @@ local function flushSetCommand()
             deviceState.enabled = en
             lastErrorMessage = ""
         else
+            mutationErrorSeq += 1
+            if not isDirty then
+                pendingState.saturation = deviceState.saturation
+                pendingState.contrast = deviceState.contrast
+                pendingState.brightness = deviceState.brightness
+                pendingState.enabled = deviceState.enabled
+            end
             lastErrorMessage = noctalia.string.trim(result.stderr or result.stdout or "Falha ao aplicar parâmetros")
             log(`Erro ao aplicar comando set: {lastErrorMessage}`)
         end
         publishStatus()
-        pollStatus()
+        if isDirty then
+            flushSetCommand()
+        else
+            pollStatus()
+        end
     end)
 end
 
@@ -481,7 +505,12 @@ local function handleCommand(cmd)
         publishStatus()
 
         if cmd.immediate then
-            flushSetCommand()
+            if isMutating then
+                isDirty = true
+                dirtyTicks = 0
+            else
+                flushSetCommand()
+            end
         else
             isDirty = true
             dirtyTicks = 0
@@ -674,6 +703,7 @@ updateDisplay()
 local currentTab = "performance" -- "performance" | "color" | "profiles"
 local newProfileName = ""
 local hasPendingColorUpdate = false
+local lastMutationErrorSeq = 0
 
 -- Cached local state to provide instant feedback before service roundtrips
 local localDevice = {
@@ -721,7 +751,7 @@ local function performanceView()
     local tempCeiling = if hasHotspot then 110 else 95
     local tempWarn = if hasHotspot then 85 else 80
 
-    local isApu = (telem.is_apu == true)
+    local isApu = (telem.is_apu == true) or (telem.gpu_type == "APU")
     local powerW = if type(telem.power_watts) == "number" then math.floor(telem.power_watts + 0.5) else 0
     local powerMaxW = if isApu then 65 else 300
 
@@ -1046,7 +1076,7 @@ local function colorView()
                 flexGrow = 1,
             }),
             ui.button({
-                text = "Monocromático",
+                text = "Mono",
                 glyph = "palette",
                 variant = "outline",
                 enabled = isEnabled,
@@ -1174,6 +1204,14 @@ end
 -- ── Main Panel Render ────────────────────────────────────────────────────────
 
 render = function()
+    -- Check if a mutation error occurred to unlock optimistic state and resync
+    if statusData and type(statusData.mutation_error_seq) == "number" then
+        if statusData.mutation_error_seq > lastMutationErrorSeq then
+            lastMutationErrorSeq = statusData.mutation_error_seq
+            hasPendingColorUpdate = false
+        end
+    end
+
     -- Sync local state with status
     if statusData and statusData.device then
         local dev = statusData.device
@@ -1370,7 +1408,12 @@ function onPresetMono()
 end
 
 function onProfileNameChange(text)
+    local wasEmpty = (newProfileName == "")
     newProfileName = noctalia.string.trim(text)
+    local isEmpty = (newProfileName == "")
+    if wasEmpty ~= isEmpty then
+        render()
+    end
 end
 
 function onSaveProfileSubmit(text)
@@ -1410,6 +1453,9 @@ sendCommand({ action = "panel_state", open = true })
 
 -- Initial render
 statusData = noctalia.state.get("status")
+if statusData and type(statusData.mutation_error_seq) == "number" then
+    lastMutationErrorSeq = statusData.mutation_error_seq
+end
 render()
 ]==],
     }
@@ -1773,5 +1819,126 @@ assert(treeColor5 ~= nil, "Scenario 5: color tree must not be nil")
 assert(hasLabelWithText(treeColor5, "Módulo /dev/chroma_amd não encontrado no kernel. Calibragem indisponível."), "Scenario 5: must warn that module is absent")
 assert(not hasLabelWithText(treeColor5, "Calibragem: ATIVADA"), "Scenario 5: must NEVER display 'Calibragem: ATIVADA' when module is absent")
 print("  [PASS] Scenario 5 passed.")
+
+-- Cenário 6 — Concorrência: comandos imediatos em trânsito não são descartados
+print("[test_ui] Running Scenario 6: Concurrent immediate set commands...")
+mockStatusResponse = {
+    exitCode = 0,
+    stdout = [[{"device":{"available":true,"enabled":1,"saturation":100,"contrast":100,"brightness":0},"telemetry":{"card":"card1","gpu_name":"AMD Radeon RX 9060 XT","gpu_type":"dGPU","pci_id":"0000:2d:00.0","device_id":"1002:7590","is_apu":false,"gpu_busy_percent":10,"sclk_mhz":1200,"vram_used_mib":2048.0,"vram_total_mib":8192.0,"gtt_used_mib":null,"gtt_total_mib":null,"temp_edge_c":45.0,"temp_junction_c":55.0,"power_watts":60.0}}]],
+    stderr = "",
+}
+for _ = 1, 20 do
+    mockEnv.update()
+end
+
+deferSetCommands = true
+pendingAsyncCallbacks = {}
+
+-- Disparar primeiro comando imediato (ex: saturação = 120)
+mockEnv.noctalia.state.set("command", { action = "set", saturation = 120, immediate = true })
+assert(#pendingAsyncCallbacks == 1, "Scenario 6: first set command must be in flight")
+assert(string.find(pendingAsyncCallbacks[1].cmd, "-s 120", 1, true) ~= nil, "Scenario 6: first command must have sat=120")
+
+-- Disparar segundo comando imediato enquanto o primeiro ainda está em trânsito (ex: saturação = 220)
+mockEnv.noctalia.state.set("command", { action = "set", saturation = 220, immediate = true })
+-- O segundo comando não deve ter sido descartado, mas também não deve ter disparado processo concorrente
+assert(#pendingAsyncCallbacks == 1, "Scenario 6: second command must wait for first without running concurrently")
+
+-- Concluir o primeiro comando
+local firstInFlight = table.remove(pendingAsyncCallbacks, 1)
+firstInFlight.cb({ exitCode = 0, stdout = "", stderr = "" })
+
+-- Ao concluir o primeiro comando, o segundo deve ser drenado imediatamente
+assert(#pendingAsyncCallbacks == 1, "Scenario 6: second command must be immediately drained after first finishes")
+assert(string.find(pendingAsyncCallbacks[1].cmd, "-s 220", 1, true) ~= nil, "Scenario 6: drained command must carry the latest value (220)")
+
+-- Concluir o segundo comando
+local secondInFlight = table.remove(pendingAsyncCallbacks, 1)
+deferSetCommands = false
+mockStatusResponse = {
+    exitCode = 0,
+    stdout = [[{"device":{"available":true,"enabled":1,"saturation":220,"contrast":100,"brightness":0},"telemetry":{"card":"card1","gpu_name":"AMD Radeon RX 9060 XT","gpu_type":"dGPU","pci_id":"0000:2d:00.0","device_id":"1002:7590","is_apu":false,"gpu_busy_percent":10,"sclk_mhz":1200,"vram_used_mib":2048.0,"vram_total_mib":8192.0,"gtt_used_mib":null,"gtt_total_mib":null,"temp_edge_c":45.0,"temp_junction_c":55.0,"power_watts":60.0}}]],
+    stderr = "",
+}
+secondInFlight.cb({ exitCode = 0, stdout = "", stderr = "" })
+
+for _ = 1, 5 do
+    mockEnv.update()
+end
+assert(mockState["status"].device.saturation == 220, "Scenario 6: final device saturation must be 220")
+print("  [PASS] Scenario 6 passed.")
+
+-- Cenário 7 — Rollback e liberação de hasPendingColorUpdate após falha em prisma-ctl set
+print("[test_ui] Running Scenario 7: Rollback on prisma-ctl set failure...")
+mockStatusResponse = {
+    exitCode = 0,
+    stdout = [[{"device":{"available":true,"enabled":1,"saturation":100,"contrast":100,"brightness":0},"telemetry":{"card":"card1","gpu_name":"AMD Radeon RX 9060 XT","gpu_type":"dGPU","pci_id":"0000:2d:00.0","device_id":"1002:7590","is_apu":false,"gpu_busy_percent":10,"sclk_mhz":1200,"vram_used_mib":2048.0,"vram_total_mib":8192.0,"gtt_used_mib":null,"gtt_total_mib":null,"temp_edge_c":45.0,"temp_junction_c":55.0,"power_watts":60.0}}]],
+    stderr = "",
+}
+for _ = 1, 20 do
+    mockEnv.update()
+end
+
+mockEnv.onTabColor()
+local treeColor7 = mockPanel.tree
+assert(treeColor7 ~= nil, "Scenario 7: color tree must not be nil")
+assert(hasLabelWithText(treeColor7, "100%"), "Scenario 7: initial saturation must be 100%")
+
+-- Ajustar saturação localmente (ex: preset competitivo -> saturação 160)
+deferSetCommands = true
+pendingAsyncCallbacks = {}
+
+mockEnv.onPresetCompetitive()
+assert(#pendingAsyncCallbacks == 1, "Scenario 7: preset competitive must trigger set command")
+assert(hasLabelWithText(mockPanel.tree, "160%"), "Scenario 7: panel must show optimistic 160%")
+
+-- Simular falha na execução de prisma-ctl set (exitCode ~= 0)
+local failedCmd = table.remove(pendingAsyncCallbacks, 1)
+deferSetCommands = false
+failedCmd.cb({ exitCode = 1, stdout = "", stderr = "Device I/O error" })
+
+-- O painel deve limpar hasPendingColorUpdate e restaurar 100% (deviceState real)
+local treeAfterError = mockPanel.tree
+assert(hasLabelWithText(treeAfterError, "100%"), "Scenario 7: panel must restore real device state (100%) on error")
+assert(not hasLabelWithText(treeAfterError, "160%"), "Scenario 7: panel must not retain failed optimistic state (160%)")
+
+-- Múltiplos updates de poll não devem reintroduzir o valor otimista falhado
+for _ = 1, 5 do
+    mockEnv.update()
+end
+assert(hasLabelWithText(mockPanel.tree, "100%"), "Scenario 7: panel must remain at 100% after subsequent poll cycles")
+assert(not hasLabelWithText(mockPanel.tree, "160%"), "Scenario 7: panel must not retain failed optimistic state")
+print("  [PASS] Scenario 7 passed.")
+
+-- Cenário 8 — onProfileNameChange atualiza botão Salvar imediatamente
+print("[test_ui] Running Scenario 8: onProfileNameChange instant save button toggle...")
+mockEnv.onTabProfiles()
+local treeProfiles8 = mockPanel.tree
+assert(treeProfiles8 ~= nil, "Scenario 8: profiles tree must not be nil")
+
+local saveBtnsInitial = findNodes(treeProfiles8, function(n)
+    return n.type == "button" and n.props.text == "Salvar"
+end)
+assert(#saveBtnsInitial == 1, "Scenario 8: 'Salvar' button must exist")
+assert(saveBtnsInitial[1].props.enabled == false, "Scenario 8: 'Salvar' button must be disabled when name is empty")
+
+-- Digitar um nome de perfil -> deve habilitar imediatamente sem chamar update()
+mockEnv.onProfileNameChange("perfil_teste")
+local treeProfilesTyped = mockPanel.tree
+local saveBtnsTyped = findNodes(treeProfilesTyped, function(n)
+    return n.type == "button" and n.props.text == "Salvar"
+end)
+assert(#saveBtnsTyped == 1, "Scenario 8: 'Salvar' button must exist after typing")
+assert(saveBtnsTyped[1].props.enabled == true, "Scenario 8: 'Salvar' button must be enabled immediately after typing")
+
+-- Limpar o nome -> deve desabilitar imediatamente sem chamar update()
+mockEnv.onProfileNameChange("   ")
+local treeProfilesCleared = mockPanel.tree
+local saveBtnsCleared = findNodes(treeProfilesCleared, function(n)
+    return n.type == "button" and n.props.text == "Salvar"
+end)
+assert(#saveBtnsCleared == 1, "Scenario 8: 'Salvar' button must exist after clearing")
+assert(saveBtnsCleared[1].props.enabled == false, "Scenario 8: 'Salvar' button must be disabled immediately after clearing")
+print("  [PASS] Scenario 8 passed.")
 
 print("All Luau UI behavioral tests PASSED successfully!")
