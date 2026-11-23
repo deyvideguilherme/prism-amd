@@ -6,7 +6,15 @@ ccflags-y += -DPRISMA_DRM_ATOMIC_COMMIT
 endif
 endif
 
-KDIR ?= /lib/modules/$(if $(KERNELRELEASE),$(KERNELRELEASE),$(shell uname -r))/build
+ifndef KDIR
+DEFAULT_KDIR := /lib/modules/$(if $(KERNELRELEASE),$(KERNELRELEASE),$(shell uname -r))/build
+ifneq ($(wildcard $(DEFAULT_KDIR)),)
+KDIR := $(DEFAULT_KDIR)
+else
+FALLBACK_KDIR := $(shell find /lib/modules /usr/lib/modules -mindepth 2 -maxdepth 2 -type d -name build 2>/dev/null | sort -V | tail -n 1)
+KDIR := $(if $(FALLBACK_KDIR),$(FALLBACK_KDIR),$(DEFAULT_KDIR))
+endif
+endif
 M ?= $(CURDIR)
 UDEV_DIR ?= /etc/udev/rules.d
 

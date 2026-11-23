@@ -143,6 +143,18 @@ struct chroma_gpu {
 /* Only simultaneous discoveries are bounded. Tracked devices and CRTCs are dynamic. */
 #define CHROMA_PENDING_GPUS 32
 #define CHROMA_RECHECK (2 * HZ)
+#define CHROMA_EBUSY_BACKOFF msecs_to_jiffies(20)
+
+enum chroma_enqueue_result {
+	CHROMA_ENQUEUE_OK = 0,
+	CHROMA_ENQUEUE_ALREADY_TRACKED,
+	CHROMA_ENQUEUE_FULL,
+	CHROMA_ENQUEUE_MODULE_FAIL,
+	CHROMA_ENQUEUE_INVALID,
+};
+
+static unsigned int kprobe_drops_full;
+static unsigned int kprobe_drops_module;
 
 static DEFINE_RAW_SPINLOCK(discovery_lock);
 static LIST_HEAD(gpus);
@@ -329,7 +341,8 @@ retry:
 /* The DRM reference keeps the mode-config storage alive. SRCU guards hardware
  * and driver state until amdgpu_pci_remove's drm_dev_unplug() can proceed.
  */
-static int chroma_update_gpu(struct chroma_gpu *gpu, const struct drm_color_ctm *target)
+static int chroma_update_gpu(struct chroma_gpu *gpu, const struct drm_color_ctm *target,
+			     bool *had_ebusy)
 {
 	struct drm_device *dev = gpu->dev;
 	struct drm_crtc *crtc;
@@ -367,10 +380,16 @@ static int chroma_update_gpu(struct chroma_gpu *gpu, const struct drm_color_ctm 
 				continue;
 			err = chroma_update_crtc(crtc, owned, target);
 			if (err) {
-				ret = err;
-				if (err != -EBUSY)
+				if (err == -EBUSY) {
+					if (had_ebusy)
+						*had_ebusy = true;
+					if (!ret)
+						ret = -EBUSY;
+				} else {
+					ret = err;
 					pr_warn_ratelimited("chroma_amd: %s CRTC %u: CTM commit failed: %pe\n",
 							    dev_name(dev->dev), crtc->base.id, ERR_PTR(err));
+				}
 			}
 		}
 		if (pm > 0)
@@ -405,35 +424,33 @@ static void chroma_forget_gpu(struct chroma_gpu *gpu)
 	kfree(gpu);
 }
 
-static bool chroma_try_enqueue_locked(struct drm_device *dev)
+static enum chroma_enqueue_result chroma_try_enqueue_locked(struct drm_device *dev)
 {
 	struct chroma_gpu *gpu;
 	unsigned int i, slot = ARRAY_SIZE(pending);
 
 	if (!dev || !dev->driver || !dev->driver->fops)
-		return false;
+		return CHROMA_ENQUEUE_INVALID;
 
 	list_for_each_entry(gpu, &gpus, link) {
 		if (gpu->dev == dev)
-			return false;
+			return CHROMA_ENQUEUE_ALREADY_TRACKED;
 	}
 	for (i = 0; i < ARRAY_SIZE(pending); ++i) {
 		if (pending[i] == dev)
-			return false;
+			return CHROMA_ENQUEUE_ALREADY_TRACKED;
 		if (!pending[i] && slot == ARRAY_SIZE(pending))
 			slot = i;
 	}
-	if (slot == ARRAY_SIZE(pending)) {
-		pr_debug("chroma_amd: pending slots full, cannot enqueue %s\n", dev_name(dev->dev));
-		return false;
-	}
-	if (!try_module_get(dev->driver->fops->owner)) {
-		pr_debug("chroma_amd: try_module_get failed for %s owner\n", dev_name(dev->dev));
-		return false;
-	}
+	if (slot == ARRAY_SIZE(pending))
+		return CHROMA_ENQUEUE_FULL;
+
+	if (!try_module_get(dev->driver->fops->owner))
+		return CHROMA_ENQUEUE_MODULE_FAIL;
+
 	drm_dev_get(dev);
 	pending[slot] = dev;
-	return true;
+	return CHROMA_ENQUEUE_OK;
 }
 
 static void chroma_collect_gpus(void)
@@ -483,7 +500,6 @@ static void chroma_scan_pci(void)
 	while ((pdev = pci_get_device(PCI_VENDOR_ID_ATI, PCI_ANY_ID, pdev)) != NULL) {
 		struct drm_device *dev = NULL;
 		unsigned long flags;
-		bool enq = false;
 
 		if ((pdev->class >> 16) != PCI_BASE_CLASS_DISPLAY)
 			continue;
@@ -492,13 +508,21 @@ static void chroma_scan_pci(void)
 		if (pdev->driver && pdev->driver->name && !strcmp(pdev->driver->name, "amdgpu")) {
 			dev = pci_get_drvdata(pdev);
 			if (dev && READ_ONCE(dev->registered) && dev->mode_config.ctm_property) {
+				enum chroma_enqueue_result enq_status;
+
 				raw_spin_lock_irqsave(&discovery_lock, flags);
-				enq = chroma_try_enqueue_locked(dev);
+				enq_status = chroma_try_enqueue_locked(dev);
 				raw_spin_unlock_irqrestore(&discovery_lock, flags);
-				if (enq) {
+				if (enq_status == CHROMA_ENQUEUE_OK) {
 					enqueued = true;
 					pr_debug("chroma_amd: proactive PCI scan enqueued %s (%s)\n",
 						 dev_name(dev->dev), pci_name(pdev));
+				} else if (enq_status == CHROMA_ENQUEUE_FULL) {
+					pr_debug("chroma_amd: proactive PCI scan: pending slots full, cannot enqueue %s\n",
+						 dev_name(dev->dev));
+				} else if (enq_status == CHROMA_ENQUEUE_MODULE_FAIL) {
+					pr_debug("chroma_amd: proactive PCI scan: try_module_get failed for %s owner\n",
+						 dev_name(dev->dev));
 				}
 			}
 		}
@@ -519,9 +543,12 @@ static void chroma_refresh(struct work_struct *work)
 	struct drm_color_ctm ctm;
 	struct drm_color_ctm *target = NULL;
 	unsigned int num_gpus = 0, num_pending = 0;
+	unsigned int drops_full = 0, drops_module = 0;
 	unsigned int p_idx;
 	unsigned long flags;
 	bool had_ebusy = false;
+	bool has_owned = false;
+	bool retry_pending = false;
 
 	raw_spin_lock_irqsave(&discovery_lock, flags);
 	refresh_queued = false;
@@ -529,6 +556,10 @@ static void chroma_refresh(struct work_struct *work)
 		raw_spin_unlock_irqrestore(&discovery_lock, flags);
 		return;
 	}
+	drops_full = kprobe_drops_full;
+	kprobe_drops_full = 0;
+	drops_module = kprobe_drops_module;
+	kprobe_drops_module = 0;
 	list_for_each_entry(gpu_count, &gpus, link)
 		num_gpus++;
 	for (p_idx = 0; p_idx < ARRAY_SIZE(pending); ++p_idx) {
@@ -536,6 +567,13 @@ static void chroma_refresh(struct work_struct *work)
 			num_pending++;
 	}
 	raw_spin_unlock_irqrestore(&discovery_lock, flags);
+
+	if (drops_full)
+		pr_debug("chroma_amd: kprobe dropped %u device discoveries (pending slots full)\n",
+			 drops_full);
+	if (drops_module)
+		pr_debug("chroma_amd: kprobe dropped %u device discoveries (try_module_get failed)\n",
+			 drops_module);
 
 	pr_debug("chroma_amd: refresh: %u tracked GPUs, %u pending\n", num_gpus, num_pending);
 
@@ -552,10 +590,16 @@ static void chroma_refresh(struct work_struct *work)
 	}
 	chroma_collect_gpus();
 	list_for_each_entry_safe(gpu, next, &gpus, link) {
-		int err = chroma_update_gpu(gpu, target);
+		unsigned int c;
 
-		if (err == -EBUSY)
-			had_ebusy = true;
+		chroma_update_gpu(gpu, target, &had_ebusy);
+
+		for (c = 0; c < gpu->num_crtcs; ++c) {
+			if (gpu->owned[c]) {
+				has_owned = true;
+				break;
+			}
+		}
 		if (drm_dev_is_unplugged(gpu->dev))
 			chroma_forget_gpu(gpu);
 	}
@@ -563,13 +607,12 @@ static void chroma_refresh(struct work_struct *work)
 	if (had_ebusy) {
 		if (busy_retry_count < CHROMA_MAX_BUSY_RETRIES) {
 			busy_retry_count++;
-			pr_debug("chroma_amd: rescheduling refresh due to -EBUSY (retry %u/%u)\n",
+			retry_pending = true;
+			pr_debug("chroma_amd: rescheduling refresh due to -EBUSY in 20ms (retry %u/%u)\n",
 				 busy_retry_count, CHROMA_MAX_BUSY_RETRIES);
 			raw_spin_lock_irqsave(&discovery_lock, flags);
-			if (!paused && !refresh_queued) {
-				refresh_queued = true;
-				queue_work(chroma_wq, &refresh_work);
-			}
+			if (!paused)
+				mod_timer(&recheck_timer, jiffies + CHROMA_EBUSY_BACKOFF);
 			raw_spin_unlock_irqrestore(&discovery_lock, flags);
 		} else {
 			pr_warn_ratelimited("chroma_amd: exceeded maximum -EBUSY retries (%u)\n",
@@ -580,10 +623,16 @@ static void chroma_refresh(struct work_struct *work)
 		busy_retry_count = 0;
 	}
 
-	raw_spin_lock_irqsave(&discovery_lock, flags);
-	if (!paused && !list_empty(&gpus) && !timer_pending(&recheck_timer))
-		mod_timer(&recheck_timer, jiffies + CHROMA_RECHECK);
-	raw_spin_unlock_irqrestore(&discovery_lock, flags);
+	if (!retry_pending) {
+		bool needs_periodic = (target != NULL) || has_owned;
+
+		raw_spin_lock_irqsave(&discovery_lock, flags);
+		if (!paused && !list_empty(&gpus) && needs_periodic && !timer_pending(&recheck_timer))
+			mod_timer(&recheck_timer, jiffies + CHROMA_RECHECK);
+		else if (!needs_periodic)
+			timer_delete(&recheck_timer);
+		raw_spin_unlock_irqrestore(&discovery_lock, flags);
+	}
 }
 
 /* Retain only the device. The commit caller already owns a DRM reference,
@@ -599,10 +648,22 @@ static int chroma_observe(struct kprobe *probe, struct pt_regs *regs)
 	    !READ_ONCE(dev->registered) || !dev->mode_config.ctm_property)
 		return 0;
 
-	/* An INT3 probe can enter with NMI accounting. Defer on contention. */
+	/* An INT3 probe executes in atomic/non-preemptible context. Defer on contention. */
 	if (!raw_spin_trylock_irqsave(&discovery_lock, flags))
 		return 0;
-	discovered = chroma_try_enqueue_locked(dev);
+	switch (chroma_try_enqueue_locked(dev)) {
+	case CHROMA_ENQUEUE_OK:
+		discovered = true;
+		break;
+	case CHROMA_ENQUEUE_FULL:
+		kprobe_drops_full++;
+		break;
+	case CHROMA_ENQUEUE_MODULE_FAIL:
+		kprobe_drops_module++;
+		break;
+	default:
+		break;
+	}
 	raw_spin_unlock_irqrestore(&discovery_lock, flags);
 
 	if (discovered)
@@ -662,7 +723,7 @@ static void chroma_stop(void)
 	unregister_pm_notifier(&chroma_pm_notifier);
 	chroma_pause();
 	list_for_each_entry_safe(gpu, next, &gpus, link) {
-		int ret = chroma_update_gpu(gpu, NULL);
+		int ret = chroma_update_gpu(gpu, NULL, NULL);
 
 		if (ret && ret != -ENODEV)
 			pr_warn("chroma_amd: %s: display color restoration at unload failed: %pe\n",
