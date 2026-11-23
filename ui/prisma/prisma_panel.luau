@@ -6,6 +6,7 @@
 local currentTab = "performance" -- "performance" | "color" | "profiles"
 local newProfileName = ""
 local hasPendingColorUpdate = false
+local lastMutationErrorSeq = 0
 
 -- Cached local state to provide instant feedback before service roundtrips
 local localDevice = {
@@ -53,7 +54,7 @@ local function performanceView()
     local tempCeiling = if hasHotspot then 110 else 95
     local tempWarn = if hasHotspot then 85 else 80
 
-    local isApu = (telem.is_apu == true)
+    local isApu = (telem.is_apu == true) or (telem.gpu_type == "APU")
     local powerW = if type(telem.power_watts) == "number" then math.floor(telem.power_watts + 0.5) else 0
     local powerMaxW = if isApu then 65 else 300
 
@@ -87,7 +88,6 @@ local function performanceView()
     })
 
     -- 2. Temperatures Block (Hotspot & Edge)
-    local isApu = (telem.is_apu == true) or (telem.gpu_type == "APU")
     local tempRightLabel = if hasHotspot then `Borda: {tempEdge}°C` else "Sensor Único (Borda)"
     local tempSubtitle = if hasHotspot then
         "Temperatura interna máxima da GPU (Hotspot)"
@@ -398,7 +398,7 @@ local function colorView()
                 flexGrow = 1,
             }),
             ui.button({
-                text = "Monocromático",
+                text = "Mono",
                 glyph = "palette",
                 variant = "outline",
                 enabled = isEnabled,
@@ -526,6 +526,14 @@ end
 -- ── Main Panel Render ────────────────────────────────────────────────────────
 
 render = function()
+    -- Check if a mutation error occurred to unlock optimistic state and resync
+    if statusData and type(statusData.mutation_error_seq) == "number" then
+        if statusData.mutation_error_seq > lastMutationErrorSeq then
+            lastMutationErrorSeq = statusData.mutation_error_seq
+            hasPendingColorUpdate = false
+        end
+    end
+
     -- Sync local state with status
     if statusData and statusData.device then
         local dev = statusData.device
@@ -722,7 +730,12 @@ function onPresetMono()
 end
 
 function onProfileNameChange(text)
+    local wasEmpty = (newProfileName == "")
     newProfileName = noctalia.string.trim(text)
+    local isEmpty = (newProfileName == "")
+    if wasEmpty ~= isEmpty then
+        render()
+    end
 end
 
 function onSaveProfileSubmit(text)
@@ -762,4 +775,7 @@ sendCommand({ action = "panel_state", open = true })
 
 -- Initial render
 statusData = noctalia.state.get("status")
+if statusData and type(statusData.mutation_error_seq) == "number" then
+    lastMutationErrorSeq = statusData.mutation_error_seq
+end
 render()

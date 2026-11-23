@@ -276,6 +276,28 @@ void test_telemetry_parser() {
     assert(format_telemetry_json(telem).find("\"gpu_name\": \"AMD Radeon RX 9060 XT\"") != std::string::npos);
     assert(format_telemetry_json(telem).find("\"gpu_type\": \"dGPU\"") != std::string::npos);
 
+    // Test decimal formatting with dot regardless of system locale
+    {
+        struct comma_numpunct : std::numpunct<char> {
+            char do_decimal_point() const override { return ','; }
+        };
+        struct LocaleGuard {
+            std::locale old_loc;
+            LocaleGuard() : old_loc(std::locale::global(std::locale(std::locale::classic(), new comma_numpunct))) {}
+            ~LocaleGuard() { std::locale::global(old_loc); }
+        } guard;
+
+        GpuTelemetry loc_telem;
+        loc_telem.vram_used_mib = 123.4;
+        loc_telem.temp_edge_c = 45.6;
+        std::string loc_json = format_telemetry_json(loc_telem);
+
+        assert(loc_json.find("123.4") != std::string::npos);
+        assert(loc_json.find("123,4") == std::string::npos);
+        assert(loc_json.find("45.6") != std::string::npos);
+        assert(loc_json.find("45,6") == std::string::npos);
+    }
+
     std::cout << "  [PASS] Test 2: SCLK & Mocked Sysfs/HWMON Telemetry Parser passed.\n";
 }
 

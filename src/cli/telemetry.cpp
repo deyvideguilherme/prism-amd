@@ -416,6 +416,7 @@ std::string format_telemetry_text(const GpuTelemetry& t) {
 
 std::string format_telemetry_json(const GpuTelemetry& t) {
     std::ostringstream ss;
+    ss.imbue(std::locale::classic());
     ss << std::fixed << std::setprecision(1);
 
     ss << "{\n";
